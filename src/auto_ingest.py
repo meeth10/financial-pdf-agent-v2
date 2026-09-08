@@ -10,20 +10,8 @@ never silently drift out of sync (Rule 1).
 
 This replaces hand-specifying --pages/--statement/--period per call
 (still available in ingest.py for one-off manual correction) with a
-single call per filing. It deliberately refuses rather than guesses in
-two places extraction is most likely to lie: low-quality tables
-(MIN_TABLE_QUALITY) and rows with more than one plausible numeric value
-and no year header to resolve them against (ambiguous_multi_period,
-see extraction/llm_cleanup.py) — both are skipped and counted, not
-silently stored.
-
-`ingest_pages_into_store` is the reusable core: it takes already-shaped
-page/table JSON (the same structure extract_financial_statements
-returns per statement) and needs no PDF on disk, which is why
-analyst_webapp.py's /analyze also calls it directly — that UI's
-uploaded file is gone (temp dir cleanup) by the time a question comes
-in, but the extracted table JSON already round-tripped through the
-browser is enough to ingest from.
+single call per filing. It deliberately refuses rather than guesses
+low-quality or ambiguous extraction results.
 """
 
 from __future__ import annotations
@@ -42,7 +30,7 @@ from src.agent.periods import canonicalize_period
 from src.store.schema import init_db
 from src.store.db import add_document, add_line_item, LineItem
 
-MIN_TABLE_QUALITY = 0.5  # below this, a table is more likely to mislead than help — Rule 2
+MIN_TABLE_QUALITY = 0.5
 
 _UNIT_HINT_RE = re.compile(
     r"(?:₹|rs\.?|inr|usd|\$)\s*(?:in\s+)?"
@@ -53,14 +41,11 @@ _UNIT_HINT_RE = re.compile(
 _EMPTY_SUMMARY = {
     "line_items_stored": 0, "pages_used": 0, "skipped_low_quality_tables": 0,
     "skipped_ambiguous_multi_period_rows": 0, "skipped_unparsed_rows": 0,
-    "cleanup_errors": [],
+    "cleanup_errors": [], "raw_table_rows": 0, "cleaned_rows": 0,
 }
 
 
 def _detect_page_unit(pdf_path: str, page: int) -> str | None:
-    """Read the free-text scale/currency declaration filings put near a
-    statement header (e.g. '(₹ in Crores)') — Rule 55. Best-effort only:
-    an undetected unit is stored as 'unspecified', never guessed."""
     try:
         with pdfplumber.open(pdf_path) as pdf:
             text = pdf.pages[page - 1].extract_text() or ""
@@ -70,23 +55,32 @@ def _detect_page_unit(pdf_path: str, page: int) -> str | None:
     return match.group(0).strip() if match else None
 
 
+def _table_debug_preview(rows: Any, limit: int = 3) -> list[Any]:
+    """Return a tiny JSON-safe preview so empty-cleanup failures are diagnosable.
+
+    We intentionally do not dump the whole table into the API response: the
+    selected evidence may contain dozens of financial rows, while the first
+    few rows are enough to identify whether the browser sent an empty table,
+    a malformed structure, or an unexpected row shape.
+    """
+    if not isinstance(rows, list):
+        return [str(type(rows).__name__)]
+    preview: list[Any] = []
+    for row in rows[:limit]:
+        if isinstance(row, (list, tuple)):
+            preview.append([str(cell) for cell in row[:8]])
+        else:
+            preview.append(str(row))
+    return preview
+
+
 def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, statement: str,
                             pages: list[dict], *, model: str = "mistral-small3.2:24b",
                             consolidated: bool | None = None,
                             unit_resolver: Callable[[int], str | None] | None = None) -> dict[str, Any]:
-    """Core ingest loop. `pages` is a list of page results shaped like
-    `extract_financial_statements(...)["statements"][statement]`:
-    `[{"page": int, "needs_ocr": bool, "tables": [...]}]`. `unit_resolver`,
-    when given, is called with a page number to detect that page's declared
-    scale (Rule 55) — omit it when there's no PDF on disk to re-read; every
-    stored row's unit falls back to "unspecified" (never guessed) rather
-    than erroring.
-
-    Cleanup failures are surfaced in the returned summary rather than silently
-    discarding the entire page, so model/parser problems are diagnosable.
-    """
     requested_period = canonicalize_period(period)
     summary = dict(_EMPTY_SUMMARY)
+    summary["cleanup_errors"] = []
 
     for page_result in pages:
         if page_result.get("needs_ocr"):
@@ -103,10 +97,25 @@ def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, st
         page_unit = unit_resolver(page) if unit_resolver else None
         summary["pages_used"] += 1
 
+        rows = table.get("rows") or []
+        summary["raw_table_rows"] += len(rows) if isinstance(rows, list) else 0
+
         try:
-            cleaned = cleanup_table(table["rows"], model=model)
+            cleaned = cleanup_table(rows, model=model)
         except Exception as exc:
             summary["cleanup_errors"].append({"page": page, "error": str(exc)})
+            continue
+
+        summary["cleaned_rows"] += len(cleaned)
+        if not cleaned:
+            summary["cleanup_errors"].append({
+                "page": page,
+                "error": "table cleanup returned 0 rows",
+                "raw_row_count": len(rows) if isinstance(rows, list) else None,
+                "table_method": table.get("method"),
+                "table_quality": table.get("quality_score"),
+                "table_preview": _table_debug_preview(rows),
+            })
             continue
 
         for row in cleaned:
@@ -117,9 +126,6 @@ def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, st
             if not metric or row.get("value") is None:
                 summary["skipped_unparsed_rows"] += 1
                 continue
-            # A detected column period (see extraction/llm_cleanup.py) is more
-            # precise than the single `period` argument when a table carries
-            # 2-3 statement years — prefer it when present.
             row_period = canonicalize_period(row["period_raw"]) if row.get("period_raw") else requested_period
             add_line_item(conn, document_id, LineItem(
                 entity=entity, period=row_period, statement=statement,
@@ -153,7 +159,8 @@ def auto_ingest(pdf_path: str, entity: str, doc_type: str, fiscal_year: str,
             unit_resolver=lambda page: _detect_page_unit(pdf_path, page),
         )
         for key in ("line_items_stored", "pages_used", "skipped_low_quality_tables",
-                    "skipped_ambiguous_multi_period_rows", "skipped_unparsed_rows"):
+                    "skipped_ambiguous_multi_period_rows", "skipped_unparsed_rows",
+                    "raw_table_rows", "cleaned_rows"):
             totals[key] += summary[key]
         totals["cleanup_errors"].extend(summary["cleanup_errors"])
         per_statement[statement] = summary["line_items_stored"]
@@ -165,8 +172,7 @@ def auto_ingest(pdf_path: str, entity: str, doc_type: str, fiscal_year: str,
 
 
 if __name__ == "__main__":
-    p = argparse.ArgumentParser(description="Discover, extract and ingest a filing in one step "
-                                             "(no manual --pages needed)")
+    p = argparse.ArgumentParser(description="Discover, extract and ingest a filing in one step")
     p.add_argument("pdf_path")
     p.add_argument("--entity", required=True)
     p.add_argument("--doc-type", required=True,
