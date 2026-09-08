@@ -7,6 +7,7 @@ pandas>=2.2
 ollama>=0.4
 pyyaml>=6.0
 flask>=3.0
+mcp[cli]>=2.0,<3
 
 # Optional, for the OCR fallback (not wired up yet — see ingest.py TODOs)
 # pytesseract>=0.3
