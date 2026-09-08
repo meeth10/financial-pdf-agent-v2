@@ -53,6 +53,7 @@ _UNIT_HINT_RE = re.compile(
 _EMPTY_SUMMARY = {
     "line_items_stored": 0, "pages_used": 0, "skipped_low_quality_tables": 0,
     "skipped_ambiguous_multi_period_rows": 0, "skipped_unparsed_rows": 0,
+    "cleanup_errors": [],
 }
 
 
@@ -70,7 +71,7 @@ def _detect_page_unit(pdf_path: str, page: int) -> str | None:
 
 
 def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, statement: str,
-                            pages: list[dict], *, model: str = "hermes3:8b",
+                            pages: list[dict], *, model: str = "mistral-small3.2:24b",
                             consolidated: bool | None = None,
                             unit_resolver: Callable[[int], str | None] | None = None) -> dict[str, Any]:
     """Core ingest loop. `pages` is a list of page results shaped like
@@ -80,6 +81,9 @@ def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, st
     scale (Rule 55) — omit it when there's no PDF on disk to re-read; every
     stored row's unit falls back to "unspecified" (never guessed) rather
     than erroring.
+
+    Cleanup failures are surfaced in the returned summary rather than silently
+    discarding the entire page, so model/parser problems are diagnosable.
     """
     requested_period = canonicalize_period(period)
     summary = dict(_EMPTY_SUMMARY)
@@ -101,7 +105,8 @@ def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, st
 
         try:
             cleaned = cleanup_table(table["rows"], model=model)
-        except Exception:
+        except Exception as exc:
+            summary["cleanup_errors"].append({"page": page, "error": str(exc)})
             continue
 
         for row in cleaned:
@@ -131,13 +136,14 @@ def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, st
 
 def auto_ingest(pdf_path: str, entity: str, doc_type: str, fiscal_year: str,
                 period: str, db_path: str, *, top_k: int = 3,
-                model: str = "hermes3:8b", consolidated: bool | None = None) -> dict[str, Any]:
+                model: str = "mistral-small3.2:24b", consolidated: bool | None = None) -> dict[str, Any]:
     discovered = extract_financial_statements(pdf_path, top_k=top_k)
     conn = init_db(db_path)
     document_id = add_document(conn, entity, doc_type, fiscal_year, pdf_path)
     requested_period = canonicalize_period(period)
 
     totals = dict(_EMPTY_SUMMARY)
+    totals["cleanup_errors"] = []
     per_statement: dict[str, int] = {}
 
     for statement, pages in discovered["statements"].items():
@@ -146,8 +152,10 @@ def auto_ingest(pdf_path: str, entity: str, doc_type: str, fiscal_year: str,
             model=model, consolidated=consolidated,
             unit_resolver=lambda page: _detect_page_unit(pdf_path, page),
         )
-        for key in totals:
+        for key in ("line_items_stored", "pages_used", "skipped_low_quality_tables",
+                    "skipped_ambiguous_multi_period_rows", "skipped_unparsed_rows"):
             totals[key] += summary[key]
+        totals["cleanup_errors"].extend(summary["cleanup_errors"])
         per_statement[statement] = summary["line_items_stored"]
 
     return {
@@ -167,7 +175,7 @@ if __name__ == "__main__":
     p.add_argument("--period", required=True)
     p.add_argument("--db", default="data/financials.db")
     p.add_argument("--top-k", type=int, default=3)
-    p.add_argument("--model", default="hermes3:8b")
+    p.add_argument("--model", default="mistral-small3.2:24b")
     p.add_argument("--consolidated", choices=["true", "false"], default=None)
     args = p.parse_args()
 
@@ -179,4 +187,6 @@ if __name__ == "__main__":
     print(f"Skipped: {summary['skipped_low_quality_tables']} low-quality tables, "
           f"{summary['skipped_ambiguous_multi_period_rows']} ambiguous multi-period rows, "
           f"{summary['skipped_unparsed_rows']} unparsed rows.")
+    if summary["cleanup_errors"]:
+        print(f"Cleanup errors: {summary['cleanup_errors']}")
     print(summary["by_statement"])
