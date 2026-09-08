@@ -1,6 +1,6 @@
 import pytest
 
-from mcp.retrieval.sources import _safe_url
+from mcp_servers.retrieval.sources import _safe_url
 
 
 def test_retrieval_rejects_unallowlisted_hosts():

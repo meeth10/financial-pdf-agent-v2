@@ -2,7 +2,7 @@ import sqlite3
 
 from src.agent.derivation import calculate_metric, calculate_growth
 from src.store.schema import SCHEMA
-from mcp.financial import tools
+from mcp_servers.financial import tools
 
 
 def make_db(tmp_path):

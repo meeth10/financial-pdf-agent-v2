@@ -1,8 +1,8 @@
 import sqlite3
 
 from src.store.schema import SCHEMA
-from mcp.evidence.conflicts import classify_pair, classify_candidates
-from mcp.evidence import tools
+from mcp_servers.evidence.conflicts import classify_pair, classify_candidates
+from mcp_servers.evidence import tools
 
 
 def make_db(tmp_path):
