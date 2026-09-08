@@ -15,7 +15,7 @@ from ollama import Client
 
 from src.extraction.pdf_router import _looks_year  # reuse the same year/FY pattern the quality scorer already applies
 
-DEFAULT_MODEL = "ornith:9b"
+DEFAULT_MODEL = "mistral-small3.2:24b"
 
 _NUMBER_RE = re.compile(
     r"(?<![A-Za-z])(?:\$|€|£|₹)?\s*"
