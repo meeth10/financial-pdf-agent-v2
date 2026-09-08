@@ -9,8 +9,8 @@ from ollama import Client
 from .system_prompt import SYSTEM_PROMPT
 from .tools import TOOL_SCHEMAS, DISPATCH
 
-# Lightweight but capable local agent. Arithmetic remains deterministic.
-DEFAULT_MODEL = "ornith:9b"
+# Default local model for financial-language tool calling.
+DEFAULT_MODEL = "mistral-small3.2:24b"
 MAX_TURNS = 8
 
 
