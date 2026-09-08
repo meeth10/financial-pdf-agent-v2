@@ -14,7 +14,11 @@ if __package__ in (None, ""):
 from flask import Flask, jsonify, render_template_string, request
 
 from src.auto_extract import extract_financial_statements
-from src.agent.context_agent import analyze_selected_output, DEFAULT_MODEL
+from src.auto_ingest import ingest_pages_into_store
+from src.store.schema import init_db
+from src.store.db import add_document
+from src.agent.run import ask as agent_ask
+from src.agent.run import DEFAULT_MODEL
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 100 * 1024 * 1024
@@ -41,7 +45,7 @@ function bestTable(p){return (p.tables||[]).slice().sort((a,b)=>(b.quality_score
 function tableHtml(t){let rows=t?.rows||[];if(!rows.length)return '<div class="empty">No validated table.</div>';let w=Math.max(...rows.map(r=>r.length));let rs=rows.map(r=>Array.from({length:w},(_,i)=>r[i]??''));let h=rs[0];let body=rs.slice(1);return '<div class="tablewrap"><table class="data"><thead><tr>'+h.map(x=>'<th>'+esc(x)+'</th>').join('')+'</tr></thead><tbody>'+body.map(r=>'<tr>'+r.map((x,i)=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</tbody></table></div>'}
 function renderPages(){if(!data)return;const pages=(data.statements?.[active]||[]);if(!pages.length){pagesEl.innerHTML='<div class="empty">No candidate pages found.</div>';return}pagesEl.innerHTML=pages.slice(0,5).map((p,i)=>{let t=bestTable(p),q=t?(t.quality_score??t.confidence??0):0;return `<div class="page"><div class="page-head"><div class="select"><input type="checkbox" class="evidence" data-page="${p.page}" ${i===0?'checked':''}><div><strong>Page ${p.page}</strong><div class="hint">Discovery score ${p.score} · ${p.needs_ocr?'OCR likely':'text layer'}</div></div></div><div><span class="badge ${q>=.78?'good':q>=.5?'warn':'bad'}">${t?Math.round(q*100)+'% quality':'No table'}</span></div></div><div class="page-body"><div>${(p.matched_terms||[]).map(x=>'<span class="badge">'+esc(x)+'</span>').join('')}${(t?.warnings||[]).map(x=>'<span class="badge warn">'+esc(x)+'</span>').join('')}</div>${t?tableHtml(t):''}</div></div>`}).join('');ask.disabled=false}
 document.getElementById('extract').onclick=async()=>{let f=fileEl.files[0];if(!f)return;statusEl.textContent='Extracting entire filing…';document.getElementById('extract').disabled=true;try{let fd=new FormData();fd.append('file',f);let r=await fetch('/extract',{method:'POST',body:fd});data=await r.json();if(!r.ok)throw Error(data.error||'Extraction failed');renderPages();statusEl.textContent='Extraction complete — select evidence and ask.'}catch(e){statusEl.textContent='Error: '+e.message}finally{document.getElementById('extract').disabled=false}};
-ask.onclick=async()=>{let q=document.getElementById('question').value.trim();if(!q||!data)return;let selected=[...document.querySelectorAll('.evidence:checked')].map(x=>Number(x.dataset.page));let pages=(data.statements?.[active]||[]).filter(p=>selected.includes(p.page));if(!pages.length){answer.textContent='Select at least one evidence page.';return}ask.disabled=true;answer.textContent='Ornith is reviewing the selected evidence…';try{let r=await fetch('/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,statement:active,evidence:{pdf:data.pdf,statement:active,pages}})});let out=await r.json();if(!r.ok)throw Error(out.error||'Analysis failed');answer.textContent=JSON.stringify(out,null,2)}catch(e){answer.textContent='Error: '+e.message}finally{ask.disabled=false}};
+ask.onclick=async()=>{let q=document.getElementById('question').value.trim();if(!q||!data)return;let selected=[...document.querySelectorAll('.evidence:checked')].map(x=>Number(x.dataset.page));let pages=(data.statements?.[active]||[]).filter(p=>selected.includes(p.page));if(!pages.length){answer.textContent='Select at least one evidence page.';return}ask.disabled=true;answer.textContent='Ornith is reviewing the selected evidence…';try{let r=await fetch('/analyze',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,statement:active,evidence:{pdf:data.pdf,statement:active,pages}})});let out=await r.json();if(!r.ok)throw Error(out.error||'Analysis failed');answer.textContent=out.answer||JSON.stringify(out,null,2)}catch(e){answer.textContent='Error: '+e.message}finally{ask.disabled=false}};
 </script></body></html>
 """
 
@@ -67,14 +71,53 @@ def extract():
 
 @app.post("/analyze")
 def analyze():
+    """Ingests the exact evidence the user selected into a scratch,
+    request-scoped store (Rule 1's retrieve-before-derive engine needs
+    a store to retrieve from), then answers through the same
+    tool-calling agent the CLI uses (agent.run.ask) — not a raw
+    one-shot completion asked to canonicalize, retrieve, and derive
+    from unstructured page text in a single pass. "Ornith 9B sees only
+    the evidence you selected" still holds: the scratch store contains
+    nothing beyond the checked pages.
+
+    Known limitation versus the CLI path (auto_ingest.py): the
+    uploaded PDF isn't kept on disk between requests, so unit
+    (currency/scale) detection — which needs to re-read the page text
+    — doesn't run here. Every stored value's unit is "unspecified"
+    unless the LLM cleanup step recovers one from the row text itself.
+    """
     payload = request.get_json(silent=True) or {}
     question = str(payload.get("question") or "").strip()
     evidence = payload.get("evidence") or {}
     if not question:
         return jsonify(error="Enter a question."), 400
+
+    statement = evidence.get("statement")
+    pages = evidence.get("pages") or []
+    if not statement or not pages:
+        return jsonify(error="Select at least one evidence page."), 400
+
+    entity = Path(str(evidence.get("pdf") or "uploaded_filing")).stem or "uploaded_filing"
+
     try:
-        result = analyze_selected_output(question, evidence, model=DEFAULT_MODEL)
-        return jsonify(result)
+        conn = init_db(":memory:")
+        document_id = add_document(conn, entity, "annual_report", "unknown", str(evidence.get("pdf") or ""))
+        ingest_summary = ingest_pages_into_store(
+            conn, document_id, entity=entity, period="UNKNOWN", statement=statement,
+            pages=pages, model=DEFAULT_MODEL,
+        )
+        if ingest_summary["line_items_stored"] == 0:
+            return jsonify(
+                answer=(
+                    "The selected evidence didn't yield any line item this agent could "
+                    "confidently store: either the table quality was too low, or every "
+                    "numeric value was ambiguous with no year header to resolve it against. "
+                    "Try a different page, or check the extraction quality badges."
+                ),
+                ingest_summary=ingest_summary,
+            )
+        answer_text = agent_ask(conn, question, model=DEFAULT_MODEL, entity=entity)
+        return jsonify(answer=answer_text, ingest_summary=ingest_summary)
     except Exception as exc:
         return jsonify(error=f"Analyst failed: {exc}"), 500
 

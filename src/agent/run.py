@@ -15,10 +15,17 @@ MAX_TURNS = 8
 
 
 def ask(conn: sqlite3.Connection, question: str, model: str = DEFAULT_MODEL,
-        host: str = "http://localhost:11434") -> str:
+        host: str = "http://localhost:11434", entity: str | None = None) -> str:
     client = Client(host=host)
+    system_prompt = SYSTEM_PROMPT
+    if entity:
+        system_prompt += (
+            f"\n\n# SESSION CONTEXT\nThe structured store for this session contains data for "
+            f"exactly one entity: \"{entity}\". Use this exact string as the `entity` argument "
+            f"for every tool call unless the question explicitly names a different company.\n"
+        )
     messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": question},
     ]
 

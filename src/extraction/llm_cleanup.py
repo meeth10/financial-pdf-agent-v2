@@ -13,6 +13,8 @@ from typing import Any
 
 from ollama import Client
 
+from src.extraction.pdf_router import _looks_year  # reuse the same year/FY pattern the quality scorer already applies
+
 DEFAULT_MODEL = "ornith:9b"
 
 _NUMBER_RE = re.compile(
@@ -50,6 +52,10 @@ def _last_number(text: str) -> float | int | None:
     return _parse_number(matches[-1].group(0))
 
 
+def _all_numbers(text: str) -> list[float | int]:
+    return [n for n in (_parse_number(m.group(0)) for m in _NUMBER_RE.finditer(text)) if n is not None]
+
+
 def _strip_numeric_tail(text: str) -> str:
     text = _clean_cell(text)
     matches = list(_NUMBER_RE.finditer(text))
@@ -59,26 +65,111 @@ def _strip_numeric_tail(text: str) -> str:
     return label.rstrip(" .:,-")
 
 
+_HEADER_LABEL_WORDS = {"particulars", "description", "details", "particulars (rs. in lakhs)", ""}
+
+
+def _detect_year_header(rows: list[list[str]], scan_rows: int = 4) -> tuple[int, dict[int, str]] | None:
+    """Look for a header row, among the first few rows, where non-label
+    columns look like a year/FY/date token — e.g. a balance sheet's
+    "Particulars | 2025 | 2024" row. Returns (header_row_index,
+    {column_index: raw_period_text}), or None if no row clears the bar.
+
+    Bar: 2+ year-like columns by default, so a single stray year
+    mentioned in running text is never mistaken for a header. Relaxed
+    to 1+ when the row's own label cell is a generic non-metric header
+    word ("Particulars", "Description", blank) — a real line item is
+    essentially never literally "Particulars", so a single year next
+    to one of those words is still solid evidence, not a guess.
+    """
+    best: tuple[int, dict[int, str]] | None = None
+    for row_index, row in enumerate(rows[:scan_rows]):
+        cells = [_clean_cell(c) for c in (row or [])]
+        if len(cells) < 2:
+            continue
+        candidate: dict[int, str] = {}
+        for col_index, cell in enumerate(cells[1:], start=1):
+            if cell and _looks_year(cell):
+                candidate[col_index] = cell
+        min_hits = 1 if cells[0].strip().lower() in _HEADER_LABEL_WORDS else 2
+        if len(candidate) < min_hits:
+            continue
+        if best is None or len(candidate) > len(best[1]):
+            best = (row_index, candidate)
+    return best
+
+
 def _deterministic_rows(rows: list[list[str]]) -> list[dict]:
+    """Parse a raw table's rows into label + value entries.
+
+    Rule 4 (never mix periods) and Rule 2 (never silently infer) both
+    bear on the same failure mode: a multi-year statement puts more
+    than one numeric token in a row (current year, prior year,
+    sometimes restated), and picking "the last one" with nothing to
+    check it against is a guess dressed up as parsing.
+
+    Preferred path: a year/FY header row is detected (Particulars |
+    2025 | 2024) — every data row then yields ONE entry per populated
+    column, each carrying that column's own `period_raw`, instead of
+    being collapsed into a single value. This is what actually lets a
+    2-3 year statement — the normal case for an annual report — get
+    ingested correctly in one pass.
+
+    Fallback: no confident header row. Same conservative behavior as
+    before — take the row's last numeric token as the value, and flag
+    the row `ambiguous_multi_period` when more than one candidate
+    value was present, so callers can skip rather than guess.
+    """
+    header = _detect_year_header(rows)
     parsed: list[dict] = []
+
+    if header:
+        header_row_index, columns = header
+        for row_index, row in enumerate(rows):
+            if row_index == header_row_index:
+                continue
+            cells = [_clean_cell(c) for c in (row or [])]
+            if not cells:
+                continue
+            label = _strip_numeric_tail(cells[0])
+            if not label:
+                continue
+            for col_index, period_raw in columns.items():
+                if col_index >= len(cells):
+                    continue
+                value = _last_number(cells[col_index])
+                if value is None:
+                    continue
+                parsed.append({
+                    "row_id": row_index, "metric_raw": label, "value": value,
+                    "period_raw": period_raw, "ambiguous_multi_period": False, "all_values": None,
+                })
+        if parsed:
+            return parsed
+        # Header row detected but nothing usable aligned under it (e.g. every
+        # data row was a single merged cell) — fall through to the legacy path.
+
     for row_index, row in enumerate(rows):
         cells = [_clean_cell(c) for c in (row or [])]
         if not cells:
             continue
 
         label = _strip_numeric_tail(cells[0])
-        value = _last_number(cells[0])
-
-        if value is None:
-            for cell in cells[1:]:
-                value = _last_number(cell)
-                if value is not None:
-                    break
-
         if not label:
             continue
 
-        parsed.append({"row_id": row_index, "metric_raw": label, "value": value})
+        numbers_in_label_cell = _all_numbers(cells[0])
+        other_cell_numbers = [n for cell in cells[1:] for n in _all_numbers(cell)]
+        all_numbers = numbers_in_label_cell + other_cell_numbers
+
+        value = all_numbers[-1] if all_numbers else None
+        parsed.append({
+            "row_id": row_index,
+            "metric_raw": label,
+            "value": value,
+            "period_raw": None,
+            "ambiguous_multi_period": len(all_numbers) > 1,
+            "all_values": all_numbers if len(all_numbers) > 1 else None,
+        })
     return parsed
 
 
@@ -103,7 +194,14 @@ def _normalize_labels_with_llm(parsed: list[dict], model: str, host: str) -> dic
         return {}
 
     client = Client(host=host)
-    payload = [{"row_id": r["row_id"], "metric_raw": r["metric_raw"]} for r in parsed]
+    # A header-mode row appears once per populated column (same row_id,
+    # same label, different value) — dedupe before sending so the LLM
+    # sees each row once, matching what its own instructions ("preserve
+    # every row_id") assume.
+    seen: dict[int, str] = {}
+    for r in parsed:
+        seen.setdefault(r["row_id"], r["metric_raw"])
+    payload = [{"row_id": row_id, "metric_raw": label} for row_id, label in seen.items()]
 
     response = client.chat(
         model=model,
@@ -146,6 +244,8 @@ def cleanup_table(rows: list[list[str]], model: str = DEFAULT_MODEL,
         labels = {}
 
     return [
-        {"metric_raw": labels.get(r["row_id"], r["metric_raw"]), "value": r["value"], "unit": None}
+        {"metric_raw": labels.get(r["row_id"], r["metric_raw"]), "value": r["value"], "unit": None,
+         "period_raw": r.get("period_raw"),
+         "ambiguous_multi_period": r["ambiguous_multi_period"], "all_values": r["all_values"]}
         for r in parsed
     ]

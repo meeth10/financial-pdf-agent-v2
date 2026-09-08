@@ -139,6 +139,45 @@ canonical_terms:
     - total assets
   total_liabilities:
     - total liabilities
+  current_assets:
+    - total current assets
+    - current assets
+  current_liabilities:
+    - total current liabilities
+    - current liabilities
+  short_term_investments:
+    - current investments
+    - short-term investments
+    - marketable securities
+    - liquid investments
+  exceptional_items:
+    - exceptional items
+    - exceptional income
+    - exceptional expense
+    - exceptional gain
+    - exceptional loss
+    - one-off items
+  short_term_debt:
+    - short-term borrowings
+    - current borrowings
+    - short-term debt
+    - current maturities of long-term debt
+  long_term_debt:
+    - long-term borrowings
+    - non-current borrowings
+    - long-term debt
+  opening_cash:
+    - cash and cash equivalents at the beginning of the year
+    - cash and cash equivalents at the beginning of the period
+    - opening cash and cash equivalents
+  closing_cash:
+    - cash and cash equivalents at the end of the year
+    - cash and cash equivalents at the end of the period
+    - closing cash and cash equivalents
+  net_change_in_cash:
+    - net increase/decrease in cash and cash equivalents
+    - net change in cash and cash equivalents
+    - net increase in cash and cash equivalents
   operating_cash_flow:
     - net cash from operating activities
     - cash generated from operations
@@ -235,10 +274,41 @@ formulas:
     expression: "(ebitda_current / ebitda_prior - 1) * 100"
     inputs: [ebitda_current, ebitda_prior]
     unit: percent
+  ebit_growth:
+    expression: "(ebit_current / ebit_prior - 1) * 100"
+    inputs: [ebit_current, ebit_prior]
+    unit: percent
   pat_growth:
     expression: "(net_income_current / net_income_prior - 1) * 100"
     inputs: [net_income_current, net_income_prior]
     unit: percent
+  net_cash:
+    expression: "cash_and_equivalents - total_debt"
+    inputs: [cash_and_equivalents, total_debt]
+  working_capital:
+    expression: "current_assets - current_liabilities"
+    inputs: [current_assets, current_liabilities]
+  asset_turnover:
+    expression: "revenue / total_assets"
+    inputs: [revenue, total_assets]
+    unit: x
+    note: "Closing total assets — see Rule 41's average-base preference for ROA/ROE; asset turnover uses the same closing-balance convention as current_ratio/quick_ratio elsewhere in this file."
+  receivable_days:
+    expression: "accounts_receivable / revenue * 365"
+    inputs: [accounts_receivable, revenue]
+    unit: days
+  inventory_days:
+    expression: "inventory / cost_of_revenue * 365"
+    inputs: [inventory, cost_of_revenue]
+    unit: days
+  payable_days:
+    expression: "accounts_payable / cost_of_revenue * 365"
+    inputs: [accounts_payable, cost_of_revenue]
+    unit: days
+  cash_conversion_cycle:
+    expression: "receivable_days + inventory_days - payable_days"
+    inputs: [receivable_days, inventory_days, payable_days]
+    unit: days
 
 policies:
   direct_over_derived: true
@@ -258,9 +328,28 @@ policies:
   derived_confidence_cap: weakest_input
 
 validation:
+  # See src/agent/validation.py for the executable form of every check
+  # below (Rule Book §52). This block documents expression + tolerance;
+  # validation.py is the source of truth for what actually runs.
   balance_sheet:
     expression: "total_assets - total_liabilities - shareholders_equity"
     tolerance_ratio: 0.005
-  cash_flow:
-    expression: "opening_cash + operating_cash_flow + investing_cash_flow + financing_cash_flow + fx_effect - closing_cash"
+  cash_flow_composition:
+    expression: "operating_cash_flow + investing_cash_flow + financing_cash_flow - net_change_in_cash"
+    tolerance_ratio: 0.01
+  opening_closing_cash:
+    expression: "opening_cash + net_change_in_cash - closing_cash"
+    tolerance_ratio: 0.01
+  ebitda:
+    expression: "ebitda - ebit - depreciation - amortisation"
+    tolerance_ratio: 0.01
+  gross_profit:
+    expression: "gross_profit - revenue + cost_of_revenue"
+    tolerance_ratio: 0.01
+  net_income_bridge:
+    expression: "net_income - pbt + tax_expense"
+    tolerance_ratio: 0.01
+    note: "Before exceptional items — a real mismatch here may legitimately be exceptional_items, not an extraction error; validation.py reports it as a FAIL to surface, not to auto-explain."
+  debt_composition:
+    expression: "total_debt - short_term_debt - long_term_debt"
     tolerance_ratio: 0.01
