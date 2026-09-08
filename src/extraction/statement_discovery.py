@@ -1,4 +1,4 @@
-"""Deterministic three-gate financial-statement page discovery."""
+"""High-recall deterministic discovery with diagnostic validation gates."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Iterable
 
 import pdfplumber
 
-from src.extraction.pdf_router import _looks_numeric, extract_page_tables
+from src.extraction.pdf_router import _looks_numeric
 
 
 @dataclass(frozen=True)
@@ -18,33 +18,75 @@ class StatementCandidate:
     score: float
     matched_terms: tuple[str, ...]
     text_preview: str
-    status: str
+    status: str = "TITLE_ONLY"
     title_match: str | None = None
     gate2_label_hits: int = 0
     gate2_structured_rows: int = 0
     gate3_numeric_columns: int = 0
     gate3_garbage_ratio: float = 1.0
-    main_cluster: bool = False
+    main_cluster: bool = True
     outside_cluster_duplicate: bool = False
     review_flag: str | None = None
 
 
-BALANCE_SHEET_TITLES = (
-    "CONSOLIDATED BALANCE SHEETS", "CONSOLIDATED BALANCE SHEET", "BALANCE SHEET",
-    "STATEMENT OF FINANCIAL POSITION", "CONSOLIDATED STATEMENTS OF FINANCIAL POSITION",
-    "STANDALONE BALANCE SHEET",
-)
-INCOME_STATEMENT_TITLES = (
-    "CONSOLIDATED STATEMENT OF PROFIT AND LOSS", "STATEMENT OF PROFIT AND LOSS",
-    "CONSOLIDATED INCOME STATEMENT", "INCOME STATEMENT", "STATEMENT OF OPERATIONS",
-    "CONSOLIDATED STATEMENTS OF OPERATIONS", "CONSOLIDATED STATEMENTS OF INCOME",
-)
-CASH_FLOW_TITLES = (
-    "CONSOLIDATED STATEMENT OF CASH FLOWS", "STATEMENT OF CASH FLOWS",
-    "CASH FLOW STATEMENT", "CONSOLIDATED CASH FLOW STATEMENT",
-)
-TITLE_LISTS = {"balance_sheet": BALANCE_SHEET_TITLES, "income_statement": INCOME_STATEMENT_TITLES,
-               "cash_flow": CASH_FLOW_TITLES}
+STATEMENT_PATTERNS: dict[str, tuple[str, ...]] = {
+    "balance_sheet": (
+        r"balance sheet",
+        r"statement of financial position",
+        r"consolidated balance sheets?",
+        r"consolidated statements? of financial position",
+        r"assets\s+and\s+liabilities",
+    ),
+    "income_statement": (
+        r"income statement",
+        r"statement of (?:profit and loss|operations)",
+        r"profit and loss account",
+        r"consolidated statements? of (?:operations|income|profit and loss)",
+        r"profit\s*&\s*loss",
+        r"statement of comprehensive income",
+    ),
+    "cash_flow": (
+        r"cash flow statement",
+        r"statement of cash flows?",
+        r"consolidated statements? of cash flows?",
+        r"cash flows? from operating activities",
+        r"cash flows? from investing activities",
+        r"cash flows? from financing activities",
+    ),
+}
+
+SUPPORT_TERMS: dict[str, tuple[str, ...]] = {
+    "balance_sheet": (
+        "total assets", "total liabilities", "shareholders' equity",
+        "shareholders’ equity", "current assets", "current liabilities",
+        "accounts receivable", "accounts payable",
+    ),
+    "income_statement": (
+        "revenue", "net sales", "operating income", "gross profit",
+        "profit before tax", "net income", "profit after tax", "ebitda",
+    ),
+    "cash_flow": (
+        "operating activities", "investing activities", "financing activities",
+        "net cash", "cash and cash equivalents", "capital expenditures",
+    ),
+}
+
+TITLE_LISTS = {
+    "balance_sheet": (
+        "CONSOLIDATED BALANCE SHEETS", "CONSOLIDATED BALANCE SHEET", "BALANCE SHEET",
+        "STATEMENT OF FINANCIAL POSITION", "CONSOLIDATED STATEMENTS OF FINANCIAL POSITION",
+        "STANDALONE BALANCE SHEET",
+    ),
+    "income_statement": (
+        "CONSOLIDATED STATEMENT OF PROFIT AND LOSS", "STATEMENT OF PROFIT AND LOSS",
+        "CONSOLIDATED INCOME STATEMENT", "INCOME STATEMENT", "STATEMENT OF OPERATIONS",
+        "CONSOLIDATED STATEMENTS OF OPERATIONS", "CONSOLIDATED STATEMENTS OF INCOME",
+    ),
+    "cash_flow": (
+        "CONSOLIDATED STATEMENT OF CASH FLOWS", "STATEMENT OF CASH FLOWS",
+        "CASH FLOW STATEMENT", "CONSOLIDATED CASH FLOW STATEMENT",
+    ),
+}
 
 STATEMENT_LABELS: dict[str, tuple[str, ...]] = {
     "balance_sheet": (
@@ -82,12 +124,31 @@ def _match_title(text: str, statement: str) -> str | None:
     for title in TITLE_LISTS[statement]:
         if _title_pattern(title).search(text):
             return title
+    for pattern in STATEMENT_PATTERNS[statement]:
+        if re.search(pattern, _normalise(text), flags=re.IGNORECASE):
+            return pattern
     return None
 
 
-def _best_table(page_number: int, pdf_path: str):
-    tables = extract_page_tables(pdf_path, page_number)
-    return max(tables, key=lambda t: (t.quality_score, t.confidence)) if tables else None
+def _score_page(text: str, statement: str) -> tuple[float, tuple[str, ...]]:
+    normalised = _normalise(text)
+    matched: list[str] = []
+    score = 0.0
+    for pattern in STATEMENT_PATTERNS[statement]:
+        if re.search(pattern, normalised, flags=re.IGNORECASE):
+            matched.append(pattern)
+            score += 10.0
+    for term in SUPPORT_TERMS[statement]:
+        if term in normalised:
+            matched.append(term)
+            score += 1.5
+    number_hits = len(re.findall(r"(?:\(?\s*[-$€£₹]?\s*[\d,]+(?:\.\d+)?\s*\)?)", text))
+    score += min(number_hits, 20) * 0.15
+    if len(normalised) >= 600:
+        score += 2.0
+    elif len(normalised) >= 250:
+        score += 1.0
+    return score, tuple(matched)
 
 
 def _gate2(rows: list[list[str]], statement: str) -> tuple[int, int]:
@@ -118,7 +179,6 @@ def _gate3(rows: list[list[str]]) -> tuple[int, float]:
             structured.append(trailing)
     if not structured:
         return 0, 1.0
-
     max_cols = max(len(r) for r in structured)
     numeric_by_col = [0] * max_cols
     garbage = 0
@@ -137,95 +197,72 @@ def _gate3(rows: list[list[str]]) -> tuple[int, float]:
     return numeric_columns, garbage / max(nonempty, 1)
 
 
-def _evaluate_page(pdf_path: str, page: int, statement: str, text: str) -> StatementCandidate | None:
+def _evaluate_page(pdf_path: str, page_number: int, statement: str, text: str) -> StatementCandidate | None:
     title = _match_title(text, statement)
     if not title:
         return None
-    table = _best_table(page, pdf_path)
+    score, matched = _score_page(text, statement)
+    # Gate diagnostics are advisory. Discovery keeps high-recall ranked candidates;
+    # downstream persistence only trusts CONFIRMED pages.
     labels = structured_rows = numeric_columns = 0
     garbage_ratio = 1.0
-    score = 10.0
-    if table is not None:
-        labels, structured_rows = _gate2(table.rows, statement)
-        numeric_columns, garbage_ratio = _gate3(table.rows)
-        score += min(labels, 6) * 1.5 + min(structured_rows, 10) * 0.2
-        score += min(numeric_columns, 4) * 1.5 + max(0.0, 1.0 - garbage_ratio) * 2.0
+    try:
+        from src.extraction.pdf_router import extract_page_tables
+        tables = extract_page_tables(pdf_path, page_number)
+        if tables:
+            table = max(tables, key=lambda t: (t.quality_score, t.confidence))
+            labels, structured_rows = _gate2(table.rows, statement)
+            numeric_columns, garbage_ratio = _gate3(table.rows)
+    except Exception:
+        pass
     gate2_pass = labels >= 3 and structured_rows >= 3
     gate3_pass = numeric_columns >= 2 and garbage_ratio <= 0.25
     status = "CONFIRMED" if gate2_pass and gate3_pass else "TITLE_ONLY"
-    if status == "TITLE_ONLY":
-        score -= 4.0
     return StatementCandidate(
-        statement=statement, page=page, score=round(score, 2), matched_terms=(title,),
+        statement=statement, page=page_number, score=round(score, 2), matched_terms=matched,
         text_preview=" ".join(text.split())[:300], status=status, title_match=title,
         gate2_label_hits=labels, gate2_structured_rows=structured_rows,
         gate3_numeric_columns=numeric_columns, gate3_garbage_ratio=round(garbage_ratio, 3),
     )
 
 
+def discover_statement_pages(pdf_path: str, *, top_k: int = 3,
+                             min_score: float = 10.0,
+                             cluster_radius: int = CLUSTER_RADIUS) -> dict[str, list[StatementCandidate]]:
+    """Scan every page, rank with the legacy high-recall scorer, and attach gate diagnostics."""
+    candidates = {statement: [] for statement in STATEMENT_ORDER}
+    with pdfplumber.open(pdf_path) as pdf:
+        page_text = [(page.extract_text() or "") for page in pdf.pages]
+    for statement in STATEMENT_ORDER:
+        for page_number, text in enumerate(page_text, start=1):
+            if not text.strip():
+                continue
+            score, matched = _score_page(text, statement)
+            if score < min_score:
+                continue
+            candidate = _evaluate_page(pdf_path, page_number, statement, text)
+            if candidate:
+                candidates[statement].append(candidate)
+    for statement in STATEMENT_ORDER:
+        candidates[statement].sort(key=lambda x: (-x.score, x.page))
+        candidates[statement] = candidates[statement][:top_k]
+    return candidates
+
+
 def discover_statement_statuses(pdf_path: str) -> dict[str, list[dict]]:
-    """Return the diagnostic gate status for every PDF page and statement type."""
     with pdfplumber.open(pdf_path) as pdf:
         page_text = [page.extract_text() or "" for page in pdf.pages]
     out: dict[str, list[dict]] = {s: [] for s in STATEMENT_ORDER}
     for statement in STATEMENT_ORDER:
         for page_number, text in enumerate(page_text, start=1):
-            title = _match_title(text, statement)
-            if not title:
-                out[statement].append({"page": page_number, "status": "NOT_A_STATEMENT_PAGE"})
-                continue
-            candidate = _evaluate_page(pdf_path, page_number, statement, text)
-            out[statement].append(asdict(candidate))
+            candidate = _evaluate_page(pdf_path, page_number, statement, text) if text.strip() else None
+            out[statement].append(asdict(candidate) if candidate else {"page": page_number, "status": "NOT_A_STATEMENT_PAGE"})
     return out
-
-
-def discover_statement_pages(pdf_path: str, *, top_k: int = 3,
-                             min_score: float = 10.0,
-                             cluster_radius: int = CLUSTER_RADIUS) -> dict[str, list[StatementCandidate]]:
-    """Discover statement pages using hard gates and a proximity cluster."""
-    with pdfplumber.open(pdf_path) as pdf:
-        page_text = [page.extract_text() or "" for page in pdf.pages]
-
-    all_candidates: dict[str, list[StatementCandidate]] = {s: [] for s in STATEMENT_ORDER}
-    for statement in STATEMENT_ORDER:
-        for page_number, text in enumerate(page_text, start=1):
-            if text.strip():
-                candidate = _evaluate_page(pdf_path, page_number, statement, text)
-                if candidate:
-                    all_candidates[statement].append(candidate)
-
-    confirmed = [c for cs in all_candidates.values() for c in cs if c.status == "CONFIRMED"]
-    anchor = max(confirmed, key=lambda c: (c.score, -c.page)) if confirmed else None
-    cluster_pages = set()
-    if anchor:
-        cluster_pages.update(range(max(1, anchor.page - cluster_radius), anchor.page + cluster_radius + 1))
-
-    result: dict[str, list[StatementCandidate]] = {s: [] for s in STATEMENT_ORDER}
-    for statement, candidates in all_candidates.items():
-        enriched = []
-        for c in candidates:
-            # A title-matched candidate inside the anchor cluster is preferred.
-            in_cluster = (c.page in cluster_pages) if anchor else True
-            outside_duplicate = c.status == "CONFIRMED" and anchor is not None and not in_cluster
-            review = "CONFIRMED_OUTSIDE_MAIN_CLUSTER" if outside_duplicate else None
-            enriched.append(StatementCandidate(
-                **{**asdict(c), "main_cluster": in_cluster,
-                   "outside_cluster_duplicate": outside_duplicate, "review_flag": review}
-            ))
-        # If a statement has no confirmed page inside the cluster, fall back to the full-document
-        # confirmed set rather than pretending proximity is sufficient. Never discard duplicates.
-        in_cluster_confirmed = [c for c in enriched if c.status == "CONFIRMED" and c.main_cluster]
-        sort_key = (lambda c: (c.status != "CONFIRMED", not c.main_cluster, -c.score, c.page))
-        enriched.sort(key=sort_key)
-        confirmed_count = sum(c.status == "CONFIRMED" for c in enriched)
-        limit = max(top_k, confirmed_count) if in_cluster_confirmed else max(top_k, confirmed_count)
-        result[statement] = enriched[:limit]
-    return result
 
 
 def discover_pages(pdf_path: str, *, top_k: int = 3) -> dict[str, list[int]]:
     discovered = discover_statement_pages(pdf_path, top_k=top_k)
-    return {s: [c.page for c in rows if c.status == "CONFIRMED"] for s, rows in discovered.items()}
+    return {statement: [candidate.page for candidate in rows] for statement, rows in discovered.items()}
 
 
 def candidates_as_dict(candidates: dict[str, Iterable[StatementCandidate]]) -> dict[str, list[dict]]:
