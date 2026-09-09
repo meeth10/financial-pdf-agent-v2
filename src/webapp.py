@@ -50,9 +50,10 @@ body{margin:0;background:#f5f6f8;color:#111827;font-family:-apple-system,BlinkMa
 .label{font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;font-weight:700}.value{font-size:25px;font-weight:800;margin-top:5px}
 .tabs{display:flex;gap:6px;margin-bottom:14px}.tab{flex:1;border:0;padding:10px;border-radius:9px;background:#eef1f5;color:#6b7280;font-weight:750;cursor:pointer}.tab.active{background:#fff;box-shadow:0 2px 8px rgba(15,23,42,.08);color:#111827}
 .statement{display:none}.statement.active{display:block}.candidate{border:1px solid #e3e7ee;border-radius:12px;margin:9px 0;overflow:hidden}.candidate summary{padding:13px 15px;cursor:pointer;display:flex;justify-content:space-between;gap:15px;list-style:none}.candidate summary::-webkit-details-marker{display:none}
-.body{padding:0 15px 15px;border-top:1px solid #e3e7ee}.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:11px}.chip{font-size:11px;padding:4px 7px;background:#f0f2f5;border-radius:999px;color:#5f6876}.chip.good{background:#e8f7ee}.chip.warn{background:#fff3df}
-.pre{white-space:pre-wrap;color:#6b7280;font-size:12px;line-height:1.5;margin-top:10px}.qa{display:grid;grid-template-columns:1fr auto;gap:10px}.answer{white-space:pre-wrap;line-height:1.6;font-size:14px;margin-top:15px;border-top:1px solid #e7ebf0;padding-top:15px}.hidden{display:none}
-@media(max-width:800px){.grid,.qa{grid-template-columns:1fr}.summary{grid-template-columns:1fr 1fr}}
+.body{padding:0 15px 15px;border-top:1px solid #e3e7ee}.chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:11px}.chip{font-size:11px;padding:4px 7px;background:#f0f2f5;border-radius:999px;color:#5f6876}.chip.good{background:#e8f7ee}.chip.warn{background:#fff3df}.chip.bad{background:#fdecea}
+.pre{white-space:pre-wrap;color:#6b7280;font-size:12px;line-height:1.5;margin-top:10px}.qa{display:grid;grid-template-columns:1fr auto;gap:10px}.answer{margin-top:15px;border-top:1px solid #e7ebf0;padding-top:15px}.answer-card{border:1px solid #e3e7ee;border-radius:14px;background:#fbfcfd;padding:18px}.answer-head{display:flex;justify-content:space-between;align-items:flex-start;gap:15px}.answer-metric{font-size:20px;font-weight:800}.answer-value{font-size:30px;font-weight:850;margin-top:6px}.status-pill{font-size:11px;font-weight:800;letter-spacing:.04em;padding:6px 9px;border-radius:999px;background:#eef1f5;color:#56606f}.status-pill.reported{background:#e8f7ee}.status-pill.derived{background:#e8f0ff}.status-pill.unavailable{background:#fff3df}.status-pill.conflicted{background:#fdecea}..answer-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:15px}.meta{padding:10px 12px;border:1px solid #e7ebf0;border-radius:10px;background:#fff}.meta .k{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#6b7280;font-weight:750}.meta .v{font-size:13px;margin-top:4px;line-height:1.4}.formula{margin-top:12px;padding:12px;border-radius:10px;background:#f3f5f7;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}.inputs{margin-top:12px;font-size:12px;line-height:1.6}.sources{margin-top:12px;font-size:12px;color:#4b5563}.reason{margin-top:12px;line-height:1.5}.raw-toggle{margin-top:12px}.raw-toggle summary{cursor:pointer;color:#6b7280;font-size:12px}.raw-answer{white-space:pre-wrap;color:#6b7280;font-size:12px;line-height:1.5;margin-top:8px}
+.hidden{display:none}
+@media(max-width:800px){.grid,.qa,.answer-grid{grid-template-columns:1fr}.summary{grid-template-columns:1fr 1fr}}
 </style>
 </head>
 <body>
@@ -94,13 +95,46 @@ body{margin:0;background:#f5f6f8;color:#111827;font-family:-apple-system,BlinkMa
   function byId(id){ return document.getElementById(id); }
   function esc(value){
     return String(value == null ? '' : value)
-      .replace(/&/g,'&amp;')
-      .replace(/</g,'&lt;')
-      .replace(/>/g,'&gt;')
-      .replace(/"/g,'&quot;')
-      .replace(/'/g,'&#039;');
+      .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+      .replace(/\"/g,'&quot;').replace(/'/g,'&#039;');
   }
   function quality(q){ return q >= 0.78 ? 'good' : q >= 0.5 ? 'warn' : ''; }
+
+  function parseAgentAnswer(text){
+    var out = {};
+    String(text || '').split(/\r?\n/).forEach(function(line){
+      var m = line.match(/^\s*([^:]+):\s*(.*)\s*$/);
+      if(m){ out[m[1].trim().toLowerCase()] = m[2].trim(); }
+    });
+    return out;
+  }
+  function statusClass(status){ return String(status || '').toLowerCase().replace(/[^a-z]+/g,''); }
+  function renderAgentAnswer(text){
+    var d = parseAgentAnswer(text);
+    var metric = d.metric || 'Financial result';
+    var status = d.status || 'UNKNOWN';
+    var cls = statusClass(status);
+    var value = d.value || (status === 'UNAVAILABLE' || status === 'CONFLICTED' ? '—' : '—');
+    var h = '<div class="answer-card">';
+    h += '<div class="answer-head"><div><div class="label">'+esc(metric)+'</div><div class="answer-metric">'+esc(metric)+'</div><div class="answer-value">'+esc(value)+'</div></div>';
+    h += '<span class="status-pill '+esc(cls)+'">'+esc(status)+'</span></div>';
+    h += '<div class="answer-grid">';
+    if(d.entity) h += '<div class="meta"><div class="k">Entity</div><div class="v">'+esc(d.entity)+'</div></div>';
+    if(d.period) h += '<div class="meta"><div class="k">Period</div><div class="v">'+esc(d.period)+'</div></div>';
+    if(d.unit) h += '<div class="meta"><div class="k">Unit</div><div class="v">'+esc(d.unit)+'</div></div>';
+    if(d.scope) h += '<div class="meta"><div class="k">Scope</div><div class="v">'+esc(d.scope)+'</div></div>';
+    if(d.confidence) h += '<div class="meta"><div class="k">Confidence</div><div class="v">'+esc(d.confidence)+'</div></div>';
+    if(d.source) h += '<div class="meta"><div class="k">Source</div><div class="v">'+esc(d.source)+'</div></div>';
+    if(d.sources) h += '<div class="meta"><div class="k">Sources</div><div class="v">'+esc(d.sources)+'</div></div>';
+    h += '</div>';
+    if(d.formula) h += '<div class="formula"><b>Formula</b><br>'+esc(d.formula)+'</div>';
+    if(d.inputs) h += '<div class="inputs"><b>Inputs</b><br>'+esc(d.inputs)+'</div>';
+    if(d.reason) h += '<div class="reason"><b>Reason</b><br>'+esc(d.reason)+'</div>';
+    h += '<details class="raw-toggle"><summary>View agent response</summary><div class="raw-answer">'+esc(text)+'</div></details>';
+    h += '</div>';
+    return h;
+  }
+
   function render(data){
     var names = {balance_sheet:'Balance Sheet', income_statement:'Income Statement', cash_flow:'Cash Flow'};
     var totalTables=0, warns=0, confirmed=0;
@@ -128,7 +162,7 @@ body{margin:0;background:#f5f6f8;color:#111827;font-family:-apple-system,BlinkMa
         var q = t ? (t.quality_score || t.confidence || 0) : 0;
         h += '<details class="candidate" '+(idx===0?'open':'')+'><summary>';
         h += '<div><b>Page '+esc(p.page)+'</b><div class="status">'+esc(p.status || 'UNKNOWN')+' · discovery '+esc(p.score)+'</div></div>';
-        h += '<div class="chips"><span class="chip '+(p.status==='CONFIRMED'?'good':'warn')+'">'+esc(p.status)+'</span>';
+        h += '<div class="chips"><span class="chip '+(p.status==='CONFIRMED'?'good':'warn')+'">'+esc(p.status || 'UNKNOWN')+'</span>';
         if(t){ h += '<span class="chip '+quality(q)+'">'+Math.round(q*100)+'% extraction</span>'; }
         h += '</div></summary><div class="body">';
         h += '<div class="chips"><span class="chip">Title: '+esc(p.title_match || 'none')+'</span><span class="chip">Gate 2 labels: '+esc(p.gate2_label_hits)+'</span><span class="chip">Gate 3 numeric cols: '+esc(p.gate3_numeric_columns)+'</span>';
@@ -168,9 +202,7 @@ body{margin:0;background:#f5f6f8;color:#111827;font-family:-apple-system,BlinkMa
     byId('status').textContent = 'Analyzing filing…';
     byId('bar').style.display = 'block';
     var fd = new FormData();
-    fd.append('file', file);
-    fd.append('entity', entity);
-    fd.append('period', period);
+    fd.append('file', file); fd.append('entity', entity); fd.append('period', period);
     try{
       var response = await fetch('/extract', {method:'POST', body:fd});
       var text = await response.text();
@@ -190,14 +222,14 @@ body{margin:0;background:#f5f6f8;color:#111827;font-family:-apple-system,BlinkMa
     var button = byId('ask');
     button.disabled=true;
     byId('qaStatus').textContent='Agent is retrieving evidence and calculating where required…';
-    byId('answer').textContent='';
+    byId('answer').innerHTML='';
     try{
       var response = await fetch('/ask', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question:question, entity:context.entity})});
       var data = await response.json();
       if(!response.ok) throw new Error(data.error || 'Agent failed');
-      byId('answer').textContent=data.answer || '';
+      byId('answer').innerHTML=renderAgentAnswer(data.answer || '');
       byId('qaStatus').textContent='Agent response complete.';
-    }catch(error){ byId('qaStatus').textContent='Error: '+error.message; }
+    }catch(error){ byId('qaStatus').textContent='Error: ' + error.message; }
     finally{ button.disabled=false; }
   });
 })();
