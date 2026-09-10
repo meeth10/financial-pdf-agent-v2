@@ -19,3 +19,24 @@ def test_webapp_exposes_agent_routes():
     assert "/" in routes
     assert "/extract" in routes
     assert "/ask" in routes
+
+
+def test_manual_session_prompt_does_not_force_consolidated_scope(monkeypatch):
+    captured = {}
+
+    class FakeClient:
+        def __init__(self, host):
+            captured["host"] = host
+
+        def chat(self, **kwargs):
+            captured["messages"] = kwargs["messages"]
+            return {"message": {"role": "assistant", "content": "ok"}}
+
+    monkeypatch.setattr("src.agent.runtime.Client", FakeClient)
+
+    from src.agent.runtime import ask
+
+    assert ask("What is PBT for FY2025?", entity="HDFC") == "ok"
+    system_message = captured["messages"][0]["content"]
+    assert "manually uploaded filing session" in system_message
+    assert "do not force consolidated=true or consolidated=false" in system_message
