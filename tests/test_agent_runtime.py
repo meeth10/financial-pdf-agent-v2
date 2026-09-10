@@ -2,12 +2,16 @@ from src.agent.runtime import DISPATCH, TOOL_SCHEMAS
 from src.webapp import app
 
 
-def test_runtime_uses_financial_and_evidence_tools():
+def test_runtime_uses_financial_evidence_and_retrieval_tools():
     assert "get_line_item" in DISPATCH
     assert "calculate_metric" in DISPATCH
     assert "get_evidence" in DISPATCH
     assert "compare_evidence" in DISPATCH
-    assert len(TOOL_SCHEMAS) >= 10
+    assert "search_filings" in DISPATCH
+    assert "fetch_document" in DISPATCH
+    assert "find_relevant_pages" in DISPATCH
+    assert "get_or_fetch_financials" in DISPATCH
+    assert len(TOOL_SCHEMAS) >= 14
 
 
 def test_webapp_exposes_agent_routes():
