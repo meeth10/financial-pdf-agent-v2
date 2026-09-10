@@ -121,19 +121,22 @@ def search_financial_results(company: str, period: str | None = None,
             low = text.lower()
             if "year" not in low and "quarter" not in low and "financial" not in low:
                 continue
-            if consolidated and "consolidated" not in low:
+            has_consolidated = bool(re.search(r"\bconsolidated\b", text, re.I))
+            has_standalone = bool(re.search(r"\bstandalone\b", text, re.I))
+            scope = True if has_consolidated and not has_standalone else False if has_standalone and not has_consolidated else None
+            if consolidated and scope is not True:
+                continue
+            if not consolidated and scope is not False:
                 continue
             inferred = _period_from_text(text)
-            if wanted and inferred and inferred != wanted:
-                continue
-            if wanted and inferred is None:
+            if wanted and inferred != wanted:
                 continue
             for pdf_url in row["pdfs"][:2]:
                 out.append({
                     "company": company, "symbol": symbol, "scrip_code": scrip_code,
                     "period": inferred, "subject": "BSE financial results", "url": pdf_url,
                     "source_type": "BSE_AUTO_RETRIEVED", "exchange": "BSE",
-                    "consolidated": consolidated,
+                    "consolidated": consolidated, "scope_asserted": scope,
                 })
         return out[:10]
     except requests.RequestException as exc:
