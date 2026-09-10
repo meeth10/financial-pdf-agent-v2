@@ -1,3 +1,4 @@
+from mcp_servers.retrieval import tools
 from mcp_servers.retrieval.sources_nse import _period_from_text as nse_period
 from mcp_servers.retrieval.sources_bse import _period_from_text as bse_period, _result_rows
 from src.store.db import LineItem, add_document, add_line_item
@@ -42,3 +43,21 @@ def test_source_type_migration_and_roundtrip(tmp_path):
     conn.close()
     assert row[0] == "NSE_AUTO_RETRIEVED"
     assert doc[0] == "NSE_AUTO_RETRIEVED"
+
+
+def test_store_hit_avoids_network(tmp_path, monkeypatch):
+    db = tmp_path / "financials.db"
+    conn = init_db(str(db))
+    doc_id = add_document(conn, "HDFC BANK", "sebi_annual", "FY2025", "x.pdf", "BSE_AUTO_RETRIEVED")
+    add_line_item(conn, doc_id, LineItem(
+        entity="HDFC BANK", period="FY2025", statement="income_statement",
+        metric="revenue", metric_raw="Revenue", value=200.0, unit="INR crore",
+        consolidated=True, source_page=2, source_table="results", extraction_method="camelot_stream",
+        extraction_confidence=0.9, source_type="BSE_AUTO_RETRIEVED",
+    ))
+    conn.close()
+    monkeypatch.setattr(tools, "_db_path", lambda: str(db))
+    monkeypatch.setattr(tools, "_search_india", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("network search should not run")))
+    result = tools.get_or_fetch_financials("HDFC BANK", "FY2025", consolidated=True)
+    assert result["status"] == "STORE_HIT"
+    assert result["source_type"] == "LOCAL_STORE"
