@@ -1,9 +1,4 @@
-"""Ollama runtime backed by the deterministic MCP tool implementations.
-
-The Flask host calls the underlying MCP tool functions directly. The MCP
-protocol servers remain available for Claude/other hosts, while this local
-process avoids unnecessary stdio subprocess round-trips.
-"""
+"""Ollama runtime backed by deterministic financial, evidence and retrieval tools."""
 
 from __future__ import annotations
 
@@ -16,6 +11,7 @@ from ollama import Client
 from .system_prompt import SYSTEM_PROMPT
 from mcp_servers.financial import tools as financial_tools
 from mcp_servers.evidence import tools as evidence_tools
+from mcp_servers.retrieval import tools as retrieval_tools
 
 DEFAULT_MODEL = "mistral-small3.2:24b"
 MAX_TURNS = 8
@@ -24,7 +20,7 @@ FINANCIAL_SCHEMAS = [
     {"type":"function","function":{"name":"get_line_item","description":"Retrieve one directly reported financial line item. Always prefer this before deriving.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
     {"type":"function","function":{"name":"list_available_periods","description":"List periods available in the financial store.","parameters":{"type":"object","properties":{"entity":{"type":"string"}},"required":["entity"]}}},
     {"type":"function","function":{"name":"list_available_metrics","description":"List normalized financial metrics available in the store.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]}},"required":["entity"]}}},
-    {"type":"function","function":{"name":"calculate_metric","description":"Calculate a rule-book metric. Directly reported values take precedence over derived values. Returns formula, inputs, provenance and confidence.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
+    {"type":"function","function":{"name":"calculate_metric","description":"Calculate a rule-book metric. Directly reported values take precedence over derived values.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
     {"type":"function","function":{"name":"calculate_growth","description":"Calculate rule-book growth for a metric using current and prior periods.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"current_period":{"type":"string"},"prior_period":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","metric","current_period","prior_period"]}}},
     {"type":"function","function":{"name":"calculate_return_ratio","description":"Calculate ROA or ROE under the deterministic rule book.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"ratio":{"type":"string","enum":["roa","roe"]},"period":{"type":"string"},"prior_period":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","ratio","period"]}}},
     {"type":"function","function":{"name":"calculate_cagr","description":"Calculate CAGR under the deterministic rule book.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"start_period":{"type":"string"},"end_period":{"type":"string"},"n_years":{"type":"number"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","metric","start_period","end_period","n_years"]}}},
@@ -36,7 +32,14 @@ EVIDENCE_SCHEMAS = [
     {"type":"function","function":{"name":"compare_evidence","description":"Classify multiple evidence candidates as AGREES, ROUNDING_DIFFERENCE, UNIT_DIFFERENCE, RESTATED, SCOPE_DIFFERENCE or TRUE_CONFLICT.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"candidates":{"type":"array","items":{"type":"object"}},"statement":{"type":"string"},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
 ]
 
-TOOL_SCHEMAS = FINANCIAL_SCHEMAS + EVIDENCE_SCHEMAS
+RETRIEVAL_SCHEMAS = [
+    {"type":"function","function":{"name":"search_filings","description":"Search SEC EDGAR for public-company filings.","parameters":{"type":"object","properties":{"company":{"type":"string"},"document_type":{"type":"string"},"period":{"type":"string"}},"required":["company"]}}},
+    {"type":"function","function":{"name":"fetch_document","description":"Fetch an allowlisted SEC filing document.","parameters":{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}}},
+    {"type":"function","function":{"name":"find_relevant_pages","description":"Find high-scoring evidence chunks in an SEC filing.","parameters":{"type":"object","properties":{"url":{"type":"string"},"query":{"type":"string"},"max_pages":{"type":"integer"}},"required":["url","query"]}}},
+    {"type":"function","function":{"name":"get_or_fetch_financials","description":"Store-first retrieval for Indian NSE/BSE financial results. Use this when the requested Indian company/period is not already in the local store. It automatically searches the exchanges, caches a matching filing PDF, and sends it through the existing deterministic extraction/ingestion pipeline.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"period":{"type":"string"},"consolidated":{"type":"boolean","default":true},"exchange":{"type":"string","enum":["NSE","BSE","BOTH"],"default":"BOTH"}},"required":["entity"]}}},
+]
+
+TOOL_SCHEMAS = FINANCIAL_SCHEMAS + EVIDENCE_SCHEMAS + RETRIEVAL_SCHEMAS
 DISPATCH = {
     "get_line_item": financial_tools.get_line_item,
     "list_available_periods": financial_tools.list_available_periods,
@@ -48,6 +51,10 @@ DISPATCH = {
     "run_validation_checks": financial_tools.run_validation_checks,
     "get_evidence": evidence_tools.get_evidence,
     "compare_evidence": evidence_tools.compare_evidence,
+    "search_filings": retrieval_tools.search_filings,
+    "fetch_document": retrieval_tools.fetch_document,
+    "find_relevant_pages": retrieval_tools.find_relevant_pages,
+    "get_or_fetch_financials": retrieval_tools.get_or_fetch_financials,
 }
 
 
@@ -60,6 +67,7 @@ def ask(question: str, *, entity: str, db_path: str = "data/financials.db",
         prompt = SYSTEM_PROMPT + (
             f"\n\n# SESSION CONTEXT\nThe structured store for this session contains data for exactly one entity: "
             f"{entity!r}. Use this exact entity string for tool calls. Do not invent a different entity."
+            "\nIf a requested Indian financial metric/period is unavailable locally, use get_or_fetch_financials before concluding UNAVAILABLE."
         )
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": prompt},
