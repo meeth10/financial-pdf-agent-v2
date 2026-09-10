@@ -1,5 +1,3 @@
-import sqlite3
-
 from mcp_servers.retrieval.sources_nse import _period_from_text as nse_period
 from mcp_servers.retrieval.sources_bse import _period_from_text as bse_period, _result_rows
 from src.store.db import LineItem, add_document, add_line_item
@@ -15,7 +13,9 @@ def test_nse_period_mapping():
 
 def test_bse_period_mapping():
     assert bse_period("2024-2025 Consolidated-Mar-25 Year New") == "FY2025"
-    assert bse_period("2025-2026 Consolidated-Jun-25 Quarter New") is None
+    assert bse_period("2025-2026 Consolidated-Jun-25 Quarter New") == "Q1FY2026"
+    assert bse_period("2025-2026 Consolidated-Sep-25 Quarter New") == "Q2FY2026"
+    assert bse_period("2025-2026 Consolidated-Dec-25 Quarter New") == "Q3FY2026"
 
 
 def test_bse_result_row_parses_pdf_link_and_scope():
