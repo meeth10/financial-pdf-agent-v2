@@ -67,6 +67,7 @@ def ask(question: str, *, entity: str, db_path: str = "data/financials.db",
         prompt = SYSTEM_PROMPT + (
             f"\n\n# SESSION CONTEXT\nThe structured store for this session contains data for exactly one entity: "
             f"{entity!r}. Use this exact entity string for tool calls. Do not invent a different entity."
+            "\nThis is a manually uploaded filing session. Consolidated/standalone scope was not captured by the web form, so do not force consolidated=true or consolidated=false for local evidence unless the user explicitly specifies the scope; leave the scope filter unset and report unknown scope when the stored evidence is unknown."
             "\nIf a requested Indian financial metric/period is unavailable locally, use get_or_fetch_financials before concluding UNAVAILABLE."
         )
         messages: list[dict[str, Any]] = [
