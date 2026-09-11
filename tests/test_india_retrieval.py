@@ -116,7 +116,7 @@ def test_scope_can_be_resolved_from_pdf_content(tmp_path, monkeypatch):
     assert selected["scope_source"] == "FILING_SECTION_HEADING"
 
 
-def test_combined_filing_can_resolve_requested_section_scope(tmp_path):
+def test_combined_filing_can_resolve_requested_section_scope(tmp_path, monkeypatch):
     import fitz
 
     pdf_path = tmp_path / "combined_scope.pdf"
@@ -138,6 +138,7 @@ def test_combined_filing_can_resolve_requested_section_scope(tmp_path):
         "url": "https://nsearchives.nseindia.com/corporate/hdfcbank.pdf", "format": "PDF",
         "exchange": "NSE", "scope_asserted": None, "subject": "Integrated Filing- Financial",
     }
+    monkeypatch.setattr(tools, "_download_attachment", lambda url, exchange, format_name: pdf_path)
     selected = tools._scope_from_document([candidate], True, "Q3FY2025")
     assert selected is not None
     assert selected["scope_asserted"] is True
