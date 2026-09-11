@@ -109,6 +109,7 @@ STATEMENT_LABELS: dict[str, tuple[str, ...]] = {
 
 STATEMENT_ORDER = ("balance_sheet", "income_statement", "cash_flow")
 CLUSTER_RADIUS = 5
+STATEMENT_LOCALITY_RADIUS = 2
 
 
 def _normalise(text: str) -> str:
@@ -202,8 +203,6 @@ def _evaluate_page(pdf_path: str, page_number: int, statement: str, text: str) -
     if not title:
         return None
     score, matched = _score_page(text, statement)
-    # Gate diagnostics are advisory. Discovery keeps high-recall ranked candidates;
-    # downstream persistence only trusts CONFIRMED pages.
     labels = structured_rows = numeric_columns = 0
     garbage_ratio = 1.0
     try:
@@ -226,26 +225,71 @@ def _evaluate_page(pdf_path: str, page_number: int, statement: str, text: str) -
     )
 
 
+def _title_candidates(page_text: list[str], statement: str, min_score: float) -> list[tuple[int, float, tuple[str, ...], str]]:
+    """Return title-gated candidates before expensive table extraction."""
+    rows: list[tuple[int, float, tuple[str, ...], str]] = []
+    for page_number, text in enumerate(page_text, start=1):
+        if not text.strip():
+            continue
+        title = _match_title(text, statement)
+        if not title:
+            continue
+        score, matched = _score_page(text, statement)
+        if score >= min_score:
+            rows.append((page_number, score, matched, title))
+    return rows
+
+
+def _local_pages(anchor_pages: Iterable[int], page_count: int, radius: int = STATEMENT_LOCALITY_RADIUS) -> set[int]:
+    pages: set[int] = set()
+    for anchor in anchor_pages:
+        start = max(1, anchor - radius)
+        end = min(page_count, anchor + radius)
+        pages.update(range(start, end + 1))
+    return pages
+
+
+def _rank_key(candidate: StatementCandidate, local_pages: set[int]) -> tuple[float, int, float]:
+    locality_bonus = 6.0 if candidate.page in local_pages else 0.0
+    return (candidate.score + locality_bonus, -candidate.page, candidate.score)
+
+
 def discover_statement_pages(pdf_path: str, *, top_k: int = 3,
                              min_score: float = 10.0,
                              cluster_radius: int = CLUSTER_RADIUS) -> dict[str, list[StatementCandidate]]:
-    """Scan every page, rank with the legacy high-recall scorer, and attach gate diagnostics."""
+    """Title-gate discovery, then use a ±2 page locality window for the other statements.
+
+    The locality window is a ranking preference, not a hard exclusion. If a
+    statement is not found near another statement, the full title-gated scan is
+    used as a high-recall fallback.
+    """
     candidates = {statement: [] for statement in STATEMENT_ORDER}
     with pdfplumber.open(pdf_path) as pdf:
         page_text = [(page.extract_text() or "") for page in pdf.pages]
+    page_count = len(page_text)
+
+    title_hits = {
+        statement: _title_candidates(page_text, statement, min_score)
+        for statement in STATEMENT_ORDER
+    }
+    anchor_pages: list[int] = []
     for statement in STATEMENT_ORDER:
-        for page_number, text in enumerate(page_text, start=1):
-            if not text.strip():
-                continue
-            score, matched = _score_page(text, statement)
-            if score < min_score:
-                continue
-            candidate = _evaluate_page(pdf_path, page_number, statement, text)
+        if title_hits[statement]:
+            anchor_pages.append(title_hits[statement][0][0])
+    local_pages = _local_pages(anchor_pages, page_count, STATEMENT_LOCALITY_RADIUS)
+
+    for statement in STATEMENT_ORDER:
+        ordered = sorted(
+            title_hits[statement],
+            key=lambda row: (0 if row[0] in local_pages else 1, -row[1], row[0]),
+        )
+        evaluated: list[StatementCandidate] = []
+        for page_number, _score, _matched, _title in ordered:
+            candidate = _evaluate_page(pdf_path, page_number, statement, page_text[page_number - 1])
             if candidate:
-                candidates[statement].append(candidate)
-    for statement in STATEMENT_ORDER:
-        candidates[statement].sort(key=lambda x: (-x.score, x.page))
-        candidates[statement] = candidates[statement][:top_k]
+                evaluated.append(candidate)
+        evaluated.sort(key=lambda candidate: _rank_key(candidate, local_pages), reverse=True)
+        candidates[statement] = evaluated[:top_k]
     return candidates
 
 
