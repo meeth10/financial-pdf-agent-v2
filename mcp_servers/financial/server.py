@@ -69,6 +69,30 @@ def run_validation_checks(entity: str, period: str, consolidated: bool | None = 
 
 
 @mcp.tool()
+def run_dcf(revenue: list[float], ebit_margin: list[float], tax_rate: list[float],
+            da: list[float], capex: list[float], delta_nwc: list[float],
+            shares_outstanding: float, cash: float, debt: float,
+            wacc: float | None = None, terminal_growth: float = 0.03,
+            exit_multiple: float | None = None,
+            risk_free_rate: float | None = None, beta: float | None = None,
+            equity_risk_premium: float | None = None,
+            pre_tax_cost_of_debt: float | None = None,
+            effective_tax_rate: float | None = None,
+            debt_weight: float | None = None) -> dict:
+    """Run the deterministic DCF engine from explicit forecast assumptions."""
+    return tools.run_dcf(
+        revenue=revenue, ebit_margin=ebit_margin, tax_rate=tax_rate,
+        da=da, capex=capex, delta_nwc=delta_nwc,
+        shares_outstanding=shares_outstanding, cash=cash, debt=debt,
+        wacc=wacc, terminal_growth=terminal_growth, exit_multiple=exit_multiple,
+        risk_free_rate=risk_free_rate, beta=beta,
+        equity_risk_premium=equity_risk_premium,
+        pre_tax_cost_of_debt=pre_tax_cost_of_debt,
+        effective_tax_rate=effective_tax_rate, debt_weight=debt_weight,
+    )
+
+
+@mcp.tool()
 def export_to_excel(entity: str, output_path: str) -> dict:
     """Export one entity's structured financial data to Excel."""
     return tools.export_to_excel(entity, output_path)
