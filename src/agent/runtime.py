@@ -12,7 +12,6 @@ from .system_prompt import SYSTEM_PROMPT
 from mcp_servers.financial import tools as financial_tools
 from mcp_servers.evidence import tools as evidence_tools
 from mcp_servers.retrieval import tools as retrieval_tools
-from src.valuation.dcf import DCFInputs, run_dcf
 
 DEFAULT_MODEL = "mistral-small3.2:24b"
 MAX_TURNS = 8
@@ -26,7 +25,7 @@ FINANCIAL_SCHEMAS = [
     {"type":"function","function":{"name":"calculate_return_ratio","description":"Calculate ROA or ROE under the deterministic rule book.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"ratio":{"type":"string","enum":["roa","roe"]},"period":{"type":"string"},"prior_period":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","ratio","period"]}}},
     {"type":"function","function":{"name":"calculate_cagr","description":"Calculate CAGR under the deterministic rule book.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"start_period":{"type":"string"},"end_period":{"type":"string"},"n_years":{"type":"number"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","metric","start_period","end_period","n_years"]}}},
     {"type":"function","function":{"name":"run_validation_checks","description":"Run deterministic accounting reconciliation checks for one entity and period.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"period":{"type":"string"},"consolidated":{"type":"boolean"}},"required":["entity","period"]}}},
-    {"type":"function","function":{"name":"run_dcf","description":"Run the deterministic discounted-cash-flow engine from explicit forecast and capital-structure inputs. The model performs no arithmetic itself.","parameters":{"type":"object","properties":{"revenue":{"type":"array","items":{"type":"number"}},"ebit_margin":{"type":"array","items":{"type":"number"}},"tax_rate":{"type":"array","items":{"type":"number"}},"da":{"type":"array","items":{"type":"number"}},"capex":{"type":"array","items":{"type":"number"}},"delta_nwc":{"type":"array","items":{"type":"number"}},"shares_outstanding":{"type":"number"},"cash":{"type":"number"},"debt":{"type":"number"},"wacc":{"type":"number"},"terminal_growth":{"type":"number"},"exit_multiple":{"type":"number"}},"required":["revenue","ebit_margin","tax_rate","da","capex","delta_nwc","shares_outstanding","cash","debt"]}}},
+    {"type":"function","function":{"name":"run_dcf","description":"Run the deterministic discounted-cash-flow engine from explicit forecast and capital-structure inputs. The model performs no arithmetic itself.","parameters":{"type":"object","properties":{"revenue":{"type":"array","items":{"type":"number"}},"ebit_margin":{"type":"array","items":{"type":"number"}},"tax_rate":{"type":"array","items":{"type":"number"}},"da":{"type":"array","items":{"type":"number"}},"capex":{"type":"array","items":{"type":"number"}},"delta_nwc":{"type":"array","items":{"type":"number"}},"shares_outstanding":{"type":"number"},"cash":{"type":"number"},"debt":{"type":"number"},"wacc":{"type":"number"},"terminal_growth":{"type":"number","default":0.03},"exit_multiple":{"type":"number"},"risk_free_rate":{"type":"number"},"beta":{"type":"number"},"equity_risk_premium":{"type":"number"},"pre_tax_cost_of_debt":{"type":"number"},"effective_tax_rate":{"type":"number"},"debt_weight":{"type":"number"}},"required":["revenue","ebit_margin","tax_rate","da","capex","delta_nwc","shares_outstanding","cash","debt"]}}},
 ]
 
 EVIDENCE_SCHEMAS = [
@@ -52,7 +51,7 @@ DISPATCH = {
     "calculate_return_ratio": financial_tools.calculate_return_ratio,
     "calculate_cagr": financial_tools.calculate_cagr,
     "run_validation_checks": financial_tools.run_validation_checks,
-    "run_dcf": lambda **kwargs: {"status": "DERIVED", **__import__("dataclasses").asdict(run_dcf(DCFInputs(**kwargs)))},
+    "run_dcf": financial_tools.run_dcf,
     "get_evidence": evidence_tools.get_evidence,
     "compare_fact_candidates": evidence_tools.compare_fact_candidates,
     "compare_evidence": evidence_tools.compare_evidence,
