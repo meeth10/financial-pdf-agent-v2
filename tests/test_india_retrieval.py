@@ -113,4 +113,32 @@ def test_scope_can_be_resolved_from_pdf_content(tmp_path, monkeypatch):
     selected = tools._scope_from_document(candidates, True, "FY2026")
     assert selected is not None
     assert selected["scope_asserted"] is True
-    assert selected["scope_source"] == "FILING_CONTENT"
+    assert selected["scope_source"] == "FILING_SECTION_HEADING"
+
+
+def test_combined_filing_can_resolve_requested_section_scope(tmp_path):
+    import fitz
+
+    pdf_path = tmp_path / "combined_scope.pdf"
+    document = fitz.open()
+    cover = document.new_page()
+    cover.insert_text((72, 72), "Integrated filing including unaudited standalone and consolidated financial results")
+    consolidated = document.new_page()
+    consolidated.insert_text((72, 72), "CONSOLIDATED FINANCIAL RESULTS")
+    standalone = document.new_page()
+    standalone.insert_text((72, 72), "STANDALONE FINANCIAL RESULTS")
+    document.save(str(pdf_path))
+    document.close()
+
+    scopes = tools._pdf_scopes(pdf_path)
+    assert scopes == {True, False}
+
+    candidate = {
+        "company": "HDFC BANK", "period": "Q3FY2025", "filing_date": "2025-01-22",
+        "url": "https://nsearchives.nseindia.com/corporate/hdfcbank.pdf", "format": "PDF",
+        "exchange": "NSE", "scope_asserted": None, "subject": "Integrated Filing- Financial",
+    }
+    selected = tools._scope_from_document([candidate], True, "Q3FY2025")
+    assert selected is not None
+    assert selected["scope_asserted"] is True
+    assert selected["scope_source"] == "FILING_SECTION_HEADING"
