@@ -1,5 +1,8 @@
+import requests
+
 from mcp_servers.retrieval import tools
 from mcp_servers.retrieval.sources_nse import _period_from_text as nse_period
+from mcp_servers.retrieval.sources_nse import _resolve_symbol
 from mcp_servers.retrieval.sources_bse import _period_from_text as bse_period, _result_rows
 from src.store.db import LineItem, add_document, add_line_item
 from src.store.schema import init_db
@@ -10,6 +13,19 @@ def test_nse_period_mapping():
     assert nse_period("results for the quarter ended June 30, 2025") == "Q1FY2026"
     assert nse_period("quarter ended September 30, 2025") == "Q2FY2026"
     assert nse_period("quarter ended December 31, 2025") == "Q3FY2026"
+
+
+def test_nse_symbol_fallback_when_autocomplete_is_unavailable():
+    response = requests.Response()
+    response.status_code = 404
+    response.url = "https://www.nseindia.com/api/search/autocomplete?q=BHARTIHEXA"
+
+    class FakeSession:
+        def get(self, *args, **kwargs):
+            return response
+
+    resolved = _resolve_symbol(FakeSession(), "BHARTIHEXA")
+    assert resolved == {"symbol": "BHARTIHEXA", "symbol_info": "BHARTIHEXA"}
 
 
 def test_bse_period_mapping():
