@@ -15,18 +15,13 @@ from src.auto_ingest import auto_ingest
 from src.store.schema import init_db
 from .xbrl import ingest_xbrl
 
-from .sources import find_relevant_pages as _find_relevant_pages
-from .sources import fetch_document as _fetch_document
-from .sources import search_filings as _search_filings
-from .sources_bse import BSESourceError, search_financial_results as _search_bse
-from .sources_nse import NSESourceError, search_financial_results as _search_nse
-
 _LAST_NETWORK_CALL = 0.0
 _MIN_NETWORK_INTERVAL = 0.75
 
 
 def search_filings(company: str, document_type: str = "10-K", period: str | None = None) -> dict[str, Any]:
     try:
+        from .sources import search_filings as _search_filings
         filings = _search_filings(company, document_type, period)
         return {"status": "REPORTED" if filings else "UNAVAILABLE", "company": company, "filings": filings}
     except Exception as exc:
@@ -35,6 +30,7 @@ def search_filings(company: str, document_type: str = "10-K", period: str | None
 
 def fetch_document(url: str) -> dict[str, Any]:
     try:
+        from .sources import fetch_document as _fetch_document
         result = _fetch_document(url)
         result["text_preview"] = result.pop("text", "")[:4000]
         return result
@@ -44,6 +40,8 @@ def fetch_document(url: str) -> dict[str, Any]:
 
 def find_relevant_pages(url: str, query: str, max_pages: int = 5) -> dict[str, Any]:
     try:
+        from .sources import find_relevant_pages as _find_relevant_pages
+        from .sources import fetch_document as _fetch_document
         document = _fetch_document(url)
         pages = _find_relevant_pages(document, query, max_pages)
         return {"status": "REPORTED" if pages else "UNAVAILABLE", "url": url, "query": query, "pages": pages}
@@ -116,6 +114,8 @@ def _search_india(company: str, period: str | None, exchange: str, consolidated:
     errors: list[str] = []
     candidates: list[dict[str, Any]] = []
     exchanges = [exchange] if exchange in {"NSE", "BSE"} else ["NSE", "BSE"]
+    from .sources_bse import BSESourceError, search_financial_results as _search_bse
+    from .sources_nse import NSESourceError, search_financial_results as _search_nse
     for item_exchange in exchanges:
         try:
             _throttle()
@@ -126,14 +126,26 @@ def _search_india(company: str, period: str | None, exchange: str, consolidated:
         except Exception as exc:
             errors.append(f"{item_exchange}: {exc}")
 
-    def rank(item: dict[str, Any]) -> tuple[int, int, str]:
+    def rank(item: dict[str, Any]) -> tuple[int, int, int, str]:
         scope = item.get("scope_asserted")
+        format_name = str(item.get("format") or "PDF").upper()
         scope_score = 2 if scope is consolidated else 1 if scope is None else 0
-        format_score = 2 if str(item.get("format", "PDF")).upper() in {"IXBRL", "XBRL"} else 1
-        return (scope_score, format_score, str(item.get("filing_date") or ""))
+        structured_score = 2 if format_name in {"IXBRL", "XBRL"} else 1
+        same_period_score = 1 if canonicalize_period(str(item.get("period") or "")) == canonicalize_period(period) if period else 0
+        return (scope_score, same_period_score, structured_score, str(item.get("filing_date") or ""))
 
     candidates.sort(key=rank, reverse=True)
     return candidates, errors
+
+
+def _select_candidate(candidates: list[dict[str, Any]], consolidated: bool) -> dict[str, Any] | None:
+    """Prefer exact scope, then structured XBRL/iXBRL, then newest filing."""
+    scoped = [c for c in candidates if c.get("scope_asserted") is consolidated]
+    if not scoped:
+        return None
+    structured = [c for c in scoped if str(c.get("format") or "PDF").upper() in {"IXBRL", "XBRL"}]
+    pool = structured or scoped
+    return sorted(pool, key=lambda c: str(c.get("filing_date") or ""), reverse=True)[0]
 
 
 def get_or_fetch_financials(entity: str, period: str | None = None,
@@ -142,70 +154,51 @@ def get_or_fetch_financials(entity: str, period: str | None = None,
     """Store-first Indian financial retrieval; prefer XBRL/iXBRL when available."""
     canonical_period = canonicalize_period(period) if period else ""
     if canonical_period and _db_has_period(entity, canonical_period, consolidated):
-        return {
-            "status": "STORE_HIT", "entity": entity, "period": canonical_period,
-            "consolidated": consolidated, "source_type": "LOCAL_STORE",
-        }
+        return {"status": "STORE_HIT", "entity": entity, "period": canonical_period,
+                "consolidated": consolidated, "source_type": "LOCAL_STORE"}
 
     candidates, errors = _search_india(entity, canonical_period or None, exchange.upper(), consolidated)
     if not candidates:
-        return {
-            "status": "SOURCE_UNAVAILABLE", "entity": entity,
-            "period": canonical_period or None, "consolidated": consolidated,
-            "reason": "No matching NSE/BSE financial-results filing was found.",
-            "source_errors": errors,
-        }
+        return {"status": "SOURCE_UNAVAILABLE", "entity": entity,
+                "period": canonical_period or None, "consolidated": consolidated,
+                "reason": "No matching NSE/BSE financial-results filing was found.",
+                "source_errors": errors}
 
-    selected = next((c for c in candidates if c.get("scope_asserted") is consolidated), None)
+    selected = _select_candidate(candidates, consolidated)
     if selected is None:
-        return {
-            "status": "SOURCE_UNAVAILABLE", "entity": entity,
-            "period": canonical_period or None, "consolidated": consolidated,
-            "reason": "Matching exchange filings were found, but none explicitly asserted the requested consolidation scope.",
-            "candidates": candidates[:5], "source_errors": errors,
-        }
+        return {"status": "SOURCE_UNAVAILABLE", "entity": entity,
+                "period": canonical_period or None, "consolidated": consolidated,
+                "reason": "Matching exchange filings were found, but none explicitly asserted the requested consolidation scope.",
+                "candidates": candidates[:5], "source_errors": errors}
 
     selected_period = canonicalize_period(selected.get("period") or canonical_period)
     if not selected_period:
-        return {
-            "status": "UNAVAILABLE", "entity": entity,
-            "reason": "The exchange returned a financial-results filing but its reporting period could not be determined.",
-            "candidates": candidates[:5], "source_errors": errors,
-        }
+        return {"status": "UNAVAILABLE", "entity": entity,
+                "reason": "The exchange returned a financial-results filing but its reporting period could not be determined.",
+                "candidates": candidates[:5], "source_errors": errors}
 
     try:
         format_name = str(selected.get("format") or "PDF").upper()
         source_type = f"{selected.get('exchange', 'INDIA')}_AUTO_RETRIEVED"
         content_path = _download_attachment(str(selected["url"]), str(selected.get("exchange") or "INDIA"), format_name)
         if format_name in {"IXBRL", "XBRL"}:
-            summary = ingest_xbrl(
-                content_path, entity=entity, fiscal_year=selected_period,
-                consolidated=consolidated, db_path=_db_path(), source_type=source_type,
-            )
+            summary = ingest_xbrl(content_path, entity=entity, fiscal_year=selected_period,
+                                  consolidated=consolidated, db_path=_db_path(), source_type=source_type)
         else:
             doc_type = "sebi_annual" if selected_period.startswith("FY") else "sebi_quarterly"
-            summary = auto_ingest(
-                str(content_path), entity, doc_type, selected_period, selected_period, _db_path(),
-                top_k=5, consolidated=consolidated, source_type=source_type,
-            )
+            summary = auto_ingest(str(content_path), entity, doc_type, selected_period, selected_period,
+                                  _db_path(), top_k=5, consolidated=consolidated, source_type=source_type)
         stored = int(summary.get("line_items_stored", 0))
         if stored == 0:
-            return {
-                "status": "SOURCE_UNAVAILABLE", "entity": entity, "period": selected_period,
-                "consolidated": consolidated,
-                "reason": "The filing was fetched, but the ingestion path stored no usable line items.",
-                "source": selected, "ingestion": summary,
-            }
-        return {
-            "status": "FETCHED_AND_INGESTED", "entity": entity, "period": selected_period,
-            "consolidated": consolidated, "source_type": source_type,
-            "source_format": format_name, "source": selected,
-            "content_path": str(content_path), "ingestion": summary,
-        }
+            return {"status": "SOURCE_UNAVAILABLE", "entity": entity, "period": selected_period,
+                    "consolidated": consolidated,
+                    "reason": "The filing was fetched, but the ingestion path stored no usable line items.",
+                    "source": selected, "ingestion": summary}
+        return {"status": "FETCHED_AND_INGESTED", "entity": entity, "period": selected_period,
+                "consolidated": consolidated, "source_type": source_type, "source_format": format_name,
+                "source": selected, "content_path": str(content_path), "ingestion": summary}
     except Exception as exc:
-        return {
-            "status": "SOURCE_UNAVAILABLE", "entity": entity, "period": selected_period,
-            "consolidated": consolidated,
-            "reason": f"Could not fetch or ingest the selected filing: {exc}",
-            "source": selected, "source_errors": errors,
-        }
+        return {"status": "SOURCE_UNAVAILABLE", "entity": entity, "period": selected_period,
+                "consolidated": consolidated,
+                "reason": f"Could not fetch or ingest the selected filing: {exc}",
+                "source": selected, "source_errors": errors}
