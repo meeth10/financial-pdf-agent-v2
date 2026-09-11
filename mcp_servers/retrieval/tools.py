@@ -143,26 +143,47 @@ def _search_india(company: str, period: str | None, exchange: str, consolidated:
     return candidates, errors
 
 
-def _pdf_scope(path: Path) -> bool | None:
-    """Read the first few PDF pages and return an explicit consolidation scope."""
+def _pdf_scopes(path: Path) -> set[bool]:
+    """Return scopes supported by explicit financial-statement section headings."""
     try:
         import fitz
+        scopes: set[bool] = set()
         with fitz.open(str(path)) as document:
-            text = "\n".join(page.get_text("text") for page in document[:4])
-        has_consolidated = bool(re.search(r"\bconsolidated\b", text, re.I))
-        has_standalone = bool(re.search(r"\bstandalone\b", text, re.I))
-        if has_consolidated and not has_standalone:
-            return True
-        if has_standalone and not has_consolidated:
-            return False
+            for page in document:
+                text = page.get_text("text")
+                for raw_line in text.splitlines():
+                    line = re.sub(r"\s+", " ", raw_line).strip()
+                    if not line:
+                        continue
+                    low = line.lower()
+                    if "standalone" in low and "financial result" in low and "consolidated" not in low:
+                        scopes.add(False)
+                    elif "consolidated" in low and "financial result" in low and "standalone" not in low:
+                        scopes.add(True)
+                    elif re.search(r"\bstandalone\s+(?:statement|balance sheet|profit|loss|cash flow)\b", low):
+                        scopes.add(False)
+                    elif re.search(r"\bconsolidated\s+(?:statement|balance sheet|profit|loss|cash flow)\b", low):
+                        scopes.add(True)
+                    elif re.search(r"^(?:unaudited\s+)?standalone\b", low) and "result" in low:
+                        scopes.add(False)
+                    elif re.search(r"^(?:unaudited\s+)?consolidated\b", low) and "result" in low:
+                        scopes.add(True)
+        return scopes
     except Exception:
-        return None
+        return set()
+
+
+def _pdf_scope(path: Path) -> bool | None:
+    """Read explicit statement section headings and return one detected scope."""
+    scopes = _pdf_scopes(path)
+    if len(scopes) == 1:
+        return next(iter(scopes))
     return None
 
 
 def _scope_from_document(candidates: list[dict[str, Any]], consolidated: bool,
                          period: str | None = None) -> dict[str, Any] | None:
-    """Resolve missing exchange scope by inspecting candidate PDF content."""
+    """Resolve missing exchange scope by inspecting section headings in candidate PDFs."""
     ordered = sorted(
         [c for c in candidates if c.get("scope_asserted") is None and str(c.get("format") or "PDF").upper() == "PDF"],
         key=lambda c: (
@@ -175,13 +196,13 @@ def _scope_from_document(candidates: list[dict[str, Any]], consolidated: bool,
     for candidate in ordered[:8]:
         try:
             path = _download_attachment(str(candidate["url"]), str(candidate.get("exchange") or "INDIA"), "PDF")
-            detected = _pdf_scope(path)
+            scopes = _pdf_scopes(path)
         except Exception:
             continue
-        if detected is consolidated:
+        if consolidated in scopes:
             enriched = dict(candidate)
-            enriched["scope_asserted"] = detected
-            enriched["scope_source"] = "FILING_CONTENT"
+            enriched["scope_asserted"] = consolidated
+            enriched["scope_source"] = "FILING_SECTION_HEADING"
             return enriched
     return None
 
