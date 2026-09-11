@@ -35,12 +35,21 @@ def list_available_metrics(entity: str, statement: str | None = None) -> dict:
 
 
 @mcp.tool()
+def compare_fact_candidates(entity: str, metric: str, period: str,
+                            candidates: list[dict] | None = None,
+                            statement: str | None = None,
+                            consolidated: bool | None = None) -> dict:
+    """Classify facts as AGREES, ROUNDING_DIFFERENCE, RESTATED, SCOPE_DIFFERENCE,
+    UNIT_DIFFERENCE, or TRUE_CONFLICT without silently choosing a winner."""
+    return tools.compare_fact_candidates(entity, metric, period, candidates, statement, consolidated)
+
+
+@mcp.tool()
 def compare_evidence(entity: str, metric: str, period: str,
                      candidates: list[dict] | None = None,
                      statement: str | None = None,
                      consolidated: bool | None = None) -> dict:
-    """Classify evidence as AGREES, ROUNDING_DIFFERENCE, UNIT_DIFFERENCE, RESTATED,
-    SCOPE_DIFFERENCE, or TRUE_CONFLICT and preserve all candidates."""
+    """Backward-compatible alias for compare_fact_candidates."""
     return tools.compare_evidence(entity, metric, period, candidates, statement, consolidated)
 
 
