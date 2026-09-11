@@ -92,3 +92,25 @@ def test_ixbrl_is_preferred_over_pdf_for_same_scope_and_period(tmp_path, monkeyp
     result = tools.get_or_fetch_financials("TEST CO", "FY2025", consolidated=True, exchange="NSE")
     assert result["status"] == "FETCHED_AND_INGESTED"
     assert result["source_format"] == "IXBRL"
+
+
+def test_scope_can_be_resolved_from_pdf_content(tmp_path, monkeypatch):
+    import fitz
+
+    pdf_path = tmp_path / "scope.pdf"
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), "Consolidated financial results\nYear ended March 31, 2026")
+    document.save(str(pdf_path))
+    document.close()
+
+    candidates = [{
+        "company": "TEST CO", "period": "FY2026", "filing_date": "2026-05-15",
+        "url": "https://nsearchives.nseindia.com/corporate/result.pdf", "format": "PDF",
+        "exchange": "NSE", "scope_asserted": None, "subject": "Financial Result Updates",
+    }]
+    monkeypatch.setattr(tools, "_download_attachment", lambda url, exchange, format_name: pdf_path)
+    selected = tools._scope_from_document(candidates, True, "FY2026")
+    assert selected is not None
+    assert selected["scope_asserted"] is True
+    assert selected["scope_source"] == "FILING_CONTENT"
