@@ -1,4 +1,5 @@
 import math
+
 import pytest
 
 from src.valuation.dcf import DCFInputs, DCFValidationError, run_dcf
@@ -21,7 +22,7 @@ def test_dcf_present_value_bridge_and_sensitivity():
     result = run_dcf(inputs)
     assert result.terminal_method == "PERPETUITY_GROWTH"
     assert result.enterprise_value > 0
-    assert result.equity_value == pytest.approx(result.enterprise_value - 150.0, abs=0) + 300.0
+    assert result.equity_value == pytest.approx(result.enterprise_value + 150.0 - 300.0)
     assert result.value_per_share == pytest.approx(result.equity_value / 100.0)
     assert len(result.sensitivity) == 5
     assert len(result.sensitivity["0.1000"]) == 5
