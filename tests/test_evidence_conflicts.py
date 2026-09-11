@@ -18,7 +18,7 @@ def base(**overrides):
 def test_six_way_conflict_taxonomy():
     assert classify_pair(base(), base()) == "AGREES"
     assert classify_pair(base(value=100.0, unit="INR crore"), base(value=100.3, unit="INR crore")) == "ROUNDING_DIFFERENCE"
-    assert classify_pair(base(value=100.0), base(value=100.0, unit="INR million")) == "UNIT_DIFFERENCE"
+    assert classify_pair(base(value=100.0, unit="INR crore"), base(value=1000.0, unit="INR million")) == "UNIT_DIFFERENCE"
     assert classify_pair(base(), base(consolidated=False)) == "SCOPE_DIFFERENCE"
     assert classify_pair(base(value=100.0), base(value=140.0, restated=True)) == "RESTATED"
     assert classify_pair(base(), base(value=140.0)) == "TRUE_CONFLICT"
