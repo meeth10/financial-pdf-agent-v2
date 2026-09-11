@@ -131,18 +131,24 @@ def _search_india(company: str, period: str | None, exchange: str, consolidated:
         format_name = str(item.get("format") or "PDF").upper()
         scope_score = 2 if scope is consolidated else 1 if scope is None else 0
         structured_score = 2 if format_name in {"IXBRL", "XBRL"} else 1
-        same_period_score = 1 if canonicalize_period(str(item.get("period") or "")) == canonicalize_period(period) if period else 0
+        same_period_score = 0
+        if period and canonicalize_period(str(item.get("period") or "")) == canonicalize_period(period):
+            same_period_score = 1
         return (scope_score, same_period_score, structured_score, str(item.get("filing_date") or ""))
 
     candidates.sort(key=rank, reverse=True)
     return candidates, errors
 
 
-def _select_candidate(candidates: list[dict[str, Any]], consolidated: bool) -> dict[str, Any] | None:
-    """Prefer exact scope, then structured XBRL/iXBRL, then newest filing."""
+def _select_candidate(candidates: list[dict[str, Any]], consolidated: bool, period: str | None = None) -> dict[str, Any] | None:
+    """Prefer exact scope, exact period, then structured XBRL/iXBRL, then newest filing."""
     scoped = [c for c in candidates if c.get("scope_asserted") is consolidated]
     if not scoped:
         return None
+    if period:
+        exact = [c for c in scoped if canonicalize_period(str(c.get("period") or "")) == canonicalize_period(period)]
+        if exact:
+            scoped = exact
     structured = [c for c in scoped if str(c.get("format") or "PDF").upper() in {"IXBRL", "XBRL"}]
     pool = structured or scoped
     return sorted(pool, key=lambda c: str(c.get("filing_date") or ""), reverse=True)[0]
@@ -164,7 +170,7 @@ def get_or_fetch_financials(entity: str, period: str | None = None,
                 "reason": "No matching NSE/BSE financial-results filing was found.",
                 "source_errors": errors}
 
-    selected = _select_candidate(candidates, consolidated)
+    selected = _select_candidate(candidates, consolidated, canonical_period or None)
     if selected is None:
         return {"status": "SOURCE_UNAVAILABLE", "entity": entity,
                 "period": canonical_period or None, "consolidated": consolidated,
