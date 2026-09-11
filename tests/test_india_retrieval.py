@@ -61,3 +61,18 @@ def test_store_hit_avoids_network(tmp_path, monkeypatch):
     result = tools.get_or_fetch_financials("HDFC BANK", "FY2025", consolidated=True)
     assert result["status"] == "STORE_HIT"
     assert result["source_type"] == "LOCAL_STORE"
+
+
+def test_ixbrl_is_preferred_over_pdf_for_same_scope_and_period(tmp_path, monkeypatch):
+    db = tmp_path / "financials.db"
+    monkeypatch.setattr(tools, "_db_path", lambda: str(db))
+    candidates = [
+        {"company": "TEST CO", "period": "FY2025", "filing_date": "2026-06-01", "url": "https://nsearchives.nseindia.com/corporate/result.pdf", "format": "PDF", "exchange": "NSE", "scope_asserted": True},
+        {"company": "TEST CO", "period": "FY2025", "filing_date": "2026-06-01", "url": "https://nsearchives.nseindia.com/corporate/ixbrl/INTEGRATED_FILING_INDAS_TEST_iXBRL_WEB.html", "format": "IXBRL", "exchange": "NSE", "scope_asserted": True},
+    ]
+    monkeypatch.setattr(tools, "_search_india", lambda *args, **kwargs: (candidates, []))
+    monkeypatch.setattr(tools, "_download_attachment", lambda url, exchange, format_name: tmp_path / ("result.html" if format_name == "IXBRL" else "result.pdf"))
+    monkeypatch.setattr(tools, "ingest_xbrl", lambda *args, **kwargs: {"line_items_stored": 3, "facts_found": 3})
+    result = tools.get_or_fetch_financials("TEST CO", "FY2025", consolidated=True, exchange="NSE")
+    assert result["status"] == "FETCHED_AND_INGESTED"
+    assert result["source_format"] == "IXBRL"
