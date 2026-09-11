@@ -9,7 +9,7 @@ from typing import Any
 
 from src.agent import tools as core
 from shared.provenance import attach_provenance
-from src.valuation.dcf import DCFInputs, run_dcf
+from src.valuation.dcf import DCFInputs, run_dcf as run_dcf_engine
 
 DEFAULT_DB_PATH = "data/financials.db"
 
@@ -77,7 +77,7 @@ def run_validation_checks(entity: str, period: str, consolidated: bool | None = 
 
 def run_dcf(**kwargs: Any) -> dict[str, Any]:
     """Run DCF outside the LLM using the deterministic valuation engine."""
-    result = run_dcf(DCFInputs(**kwargs))
+    result = run_dcf_engine(DCFInputs(**kwargs))
     return {"status": "DERIVED", **asdict(result)}
 
 
