@@ -59,10 +59,12 @@ def get_evidence(entity: str, metric: str, period: str, statement: str | None = 
         result.update({k: candidates[0].get(k) for k in (
             "value", "unit", "statement", "consolidated", "source_page",
             "source_table", "extraction_method", "extraction_confidence", "filepath",
+            "source_type",
         )})
         result["provenance"] = {"document_id": candidates[0]["document_id"],
                                  "source_page": candidates[0].get("source_page"),
                                  "source": candidates[0].get("filepath"),
+                                 "source_type": candidates[0].get("source_type"),
                                  "extraction_method": candidates[0].get("extraction_method"),
                                  "extraction_confidence": candidates[0].get("extraction_confidence")}
     else:
@@ -88,18 +90,34 @@ def list_available_metrics(entity: str, statement: str | None = None) -> dict[st
             "statement": statement, "metrics": [r[0] for r in rows]}
 
 
-def compare_evidence(entity: str, metric: str, period: str,
-                     candidates: list[dict[str, Any]] | None = None,
-                     statement: str | None = None,
-                     consolidated: bool | None = None) -> dict[str, Any]:
+def compare_fact_candidates(entity: str, metric: str, period: str,
+                            candidates: list[dict[str, Any]] | None = None,
+                            statement: str | None = None,
+                            consolidated: bool | None = None) -> dict[str, Any]:
+    """Classify all supplied/stored fact candidates using the six-way taxonomy."""
     if candidates is None:
         with open_db() as conn:
             candidates = _fetch(conn, entity, metric, period, statement, consolidated)
     if not candidates:
         return {"status": "UNAVAILABLE", "entity": entity, "metric": canonicalize_metric(metric),
-                "period": canonicalize_period(period), "reason": "no evidence candidates"}
+                "period": canonicalize_period(period), "reason": "no fact candidates"}
     comparison = classify_candidates(candidates)
-    return {"status": comparison["overall"] if comparison["overall"] in {
-        "TRUE_CONFLICT", "SCOPE_DIFFERENCE", "RESTATED", "UNIT_DIFFERENCE", "ROUNDING_DIFFERENCE", "AGREES"
-    } else "TRUE_CONFLICT", "entity": entity, "metric": canonicalize_metric(metric),
-            "period": canonicalize_period(period), **comparison}
+    return {
+        "status": comparison["overall"],
+        "entity": entity,
+        "metric": canonicalize_metric(metric),
+        "period": canonicalize_period(period),
+        "classification_order": [
+            "AGREES", "ROUNDING_DIFFERENCE", "RESTATED",
+            "SCOPE_DIFFERENCE", "UNIT_DIFFERENCE", "TRUE_CONFLICT",
+        ],
+        **comparison,
+    }
+
+
+def compare_evidence(entity: str, metric: str, period: str,
+                     candidates: list[dict[str, Any]] | None = None,
+                     statement: str | None = None,
+                     consolidated: bool | None = None) -> dict[str, Any]:
+    """Backward-compatible alias for compare_fact_candidates."""
+    return compare_fact_candidates(entity, metric, period, candidates, statement, consolidated)
