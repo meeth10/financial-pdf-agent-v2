@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from dataclasses import asdict
 from typing import Any
 
 from src.agent import tools as core
-from src.agent.derivation import canonicalize_metric
-from src.agent.periods import canonicalize_period
-
 from shared.provenance import attach_provenance
+from src.valuation.dcf import DCFInputs, run_dcf
 
 DEFAULT_DB_PATH = "data/financials.db"
 
@@ -74,6 +73,12 @@ def run_validation_checks(entity: str, period: str, consolidated: bool | None = 
     with open_db() as conn:
         result = core.run_validation_checks(conn, entity, period, consolidated)
     return attach_provenance(result, entity=entity)
+
+
+def run_dcf(**kwargs: Any) -> dict[str, Any]:
+    """Run DCF outside the LLM using the deterministic valuation engine."""
+    result = run_dcf(DCFInputs(**kwargs))
+    return {"status": "DERIVED", **asdict(result)}
 
 
 def export_to_excel(entity: str, output_path: str) -> dict[str, Any]:
