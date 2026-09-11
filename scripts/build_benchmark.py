@@ -8,7 +8,7 @@ import sqlite3
 from pathlib import Path
 
 from src.agent.derivation import canonicalize_metric
-from src.agent.tools import get_line_item as core_get_line_item, calculate_metric_tool
+from src.agent.tools import get_line_item, calculate_metric_tool
 from src.store.schema import init_db
 
 QUESTION_TEMPLATES = [
@@ -93,7 +93,9 @@ def build(db_path: str, entity: str, period: str, count: int) -> list[dict]:
 def get_line_item_for_benchmark(db_path: str, entity: str, metric: str, period: str) -> dict:
     conn = init_db(db_path)
     try:
-        return core_get_line_item(conn, entity, metric, period)
+        return __import__("mcp_servers.financial.tools", fromlist=["get_line_item"]).get_line_item(
+            entity, metric, period
+        )
     finally:
         conn.close()
 

@@ -43,7 +43,15 @@ def _session() -> requests.Session:
 def _resolve_symbol(session: requests.Session, company: str) -> dict[str, Any] | None:
     target = company.strip().lower()
     response = session.get(NSE_AUTOCOMPLETE, params={"q": company}, timeout=15)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        # NSE has intermittently removed or disabled its autocomplete endpoint.
+        # The financial-results endpoint still accepts a known equity symbol,
+        # so preserve direct ticker lookups instead of failing the whole source.
+        if exc.response is not None and exc.response.status_code == 404 and company.strip():
+            return {"symbol": company.strip(), "symbol_info": company.strip()}
+        raise
     payload = response.json() or {}
     symbols = payload.get("symbols") or []
     if not symbols:
@@ -102,7 +110,6 @@ def _archive_url(path: str) -> str:
 
 
 def _ixbrl_urls(record: dict[str, Any]) -> list[str]:
-    """Extract explicitly published NSE iXBRL/iXBRL-web URLs when present."""
     urls: list[str] = []
     for value in record.values():
         if not isinstance(value, str):
@@ -111,7 +118,7 @@ def _ixbrl_urls(record: dict[str, Any]) -> list[str]:
     cleaned: list[str] = []
     for url in urls:
         normalized = _archive_url(url.replace("&amp;", "&"))
-        if "/corporate/ixbrl/" in normalized.lower() or "ixbrl" in normalized.lower():
+        if "ixbrl" in normalized.lower() or "xbrl" in normalized.lower():
             if normalized not in cleaned:
                 cleaned.append(normalized)
     return cleaned
@@ -153,8 +160,9 @@ def search_financial_results(company: str, period: str | None = None) -> list[di
             if "financial result" not in text.lower() and "financials" not in text.lower() and "integrated filing" not in text.lower():
                 continue
             inferred = _infer_period(record)
-            if wanted and inferred != wanted: continue
-            if attached and not attached.lower().startswith("http"):
+            if wanted and inferred != wanted:
+                continue
+            if attached:
                 attached = _archive_url(attached)
             common = {
                 "company": str(record.get("sm_name") or symbol_row.get("symbol_info") or company),
@@ -170,7 +178,7 @@ def search_financial_results(company: str, period: str | None = None) -> list[di
                 out.append({**common, "url": url, "format": "IXBRL"})
             if attached:
                 out.append({**common, "url": attached, "format": "PDF"})
-        out.sort(key=lambda x: (0 if x.get("format") == "IXBRL" else 1, str(x.get("filing_date") or "")), reverse=False)
+        out.sort(key=lambda x: (str(x.get("filing_date") or ""), 0 if x.get("format") == "IXBRL" else 1), reverse=True)
         return out[:20]
     except requests.RequestException as exc:
         raise NSESourceError(f"NSE request failed: {exc}") from exc

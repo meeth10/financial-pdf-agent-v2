@@ -74,6 +74,18 @@ def _looks_numeric(value: str) -> bool:
     return bool(NUMERIC_RE.match(s.replace(" ", "")))
 
 
+EMBEDDED_NUMERIC_RE = re.compile(
+    r"(?<![A-Za-z0-9])"
+    r"\(?[-+]?\s*\d[\d,]*(?:\.\d+)?%?\)?"
+    r"(?![A-Za-z0-9])"
+)
+
+
+def _embedded_numeric_count(value: str) -> int:
+    """Count numeric values embedded inside otherwise textual cells."""
+    return len(EMBEDDED_NUMERIC_RE.findall(value.replace("−", "-")))
+
+
 def _looks_year(value: str) -> bool:
     s = value.strip().replace(" ", "")
     if YEAR_RE.match(s):
@@ -93,6 +105,14 @@ def _table_stats(rows: list[list[str]]) -> dict[str, float | int]:
     numeric_cells = sum(numeric_counts)
     numeric_rows = sum(n >= 1 for n in numeric_counts)
     multi_numeric_rows = sum(n >= 2 for n in numeric_counts)
+
+    embedded_numeric_counts = [
+        sum(_embedded_numeric_count(c) for c in r)
+        for r in rows
+    ]
+    embedded_numeric_cells = sum(embedded_numeric_counts)
+    embedded_numeric_rows = sum(n >= 1 for n in embedded_numeric_counts)
+    multi_embedded_numeric_rows = sum(n >= 2 for n in embedded_numeric_counts)
     year_hits = sum(_looks_year(c) for r in rows[:4] for c in r)
     text = " ".join(c.lower() for r in rows for c in r)
     term_hits = sum(text.count(term) for term in FINANCIAL_TERMS)
@@ -105,6 +125,9 @@ def _table_stats(rows: list[list[str]]) -> dict[str, float | int]:
         "numeric_cells": numeric_cells,
         "numeric_rows": numeric_rows,
         "multi_numeric_rows": multi_numeric_rows,
+        "embedded_numeric_cells": embedded_numeric_cells,
+        "embedded_numeric_rows": embedded_numeric_rows,
+        "multi_embedded_numeric_rows": multi_embedded_numeric_rows,
         "year_hits": year_hits,
         "term_hits": term_hits,
         "total_hits": total_hits,
@@ -127,6 +150,9 @@ def _quality_score(rows: list[list[str]], method_score: float = 0.0) -> tuple[fl
     numeric_cells = int(s["numeric_cells"])
     numeric_rows = int(s["numeric_rows"])
     multi_numeric_rows = int(s["multi_numeric_rows"])
+    embedded_numeric_cells = int(s["embedded_numeric_cells"])
+    embedded_numeric_rows = int(s["embedded_numeric_rows"])
+    multi_embedded_numeric_rows = int(s["multi_embedded_numeric_rows"])
     year_hits = int(s["year_hits"])
     term_hits = int(s["term_hits"])
     total_hits = int(s["total_hits"])
@@ -143,7 +169,12 @@ def _quality_score(rows: list[list[str]], method_score: float = 0.0) -> tuple[fl
     score += min(term_hits / 8.0, 1.0) * 0.09
     score += min(total_hits / 3.0, 1.0) * 0.03
 
-    if max_width <= 1 and numeric_cells > 0:
+    if max_width <= 1 and (
+        numeric_cells > 0
+        or embedded_numeric_cells > 0
+        or embedded_numeric_rows >= 2
+        or multi_embedded_numeric_rows > 0
+    ):
         warnings.append("collapsed_columns")
         score -= 0.35
     if max_width >= 2 and multi_numeric_rows / max(row_count, 1) < 0.20:

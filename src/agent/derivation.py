@@ -60,8 +60,8 @@ def _direct_lookup(conn, entity: str, metric: str, period: str, statement: str |
         "status": "REPORTED", "metric": canonical, "value": row["value"],
         "unit": row["unit"], "period": row["period"], "statement": row["statement"],
         "consolidated": row["consolidated"], "source_page": row["source_page"],
-        "source_table": row["source_table"], "confidence": level,
-        "extraction_confidence": confidence,
+        "source_table": row["source_table"], "source_type": row.get("source_type", "MANUAL_UPLOAD"),
+        "confidence": level, "extraction_confidence": confidence,
     }
 
 

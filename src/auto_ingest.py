@@ -1,18 +1,4 @@
-"""Bridge automatic statement discovery straight into the structured store.
-
-`auto_extract.extract_financial_statements` already finds and ranks the
-pages likely to hold each statement — that's the part of the pipeline
-that's "doing a great job." What was missing was the next step: turning
-those ranked pages/tables into canonical `line_items` rows, using the
-SAME dictionary the query-time agent (derivation.calculate_metric,
-agent.run.ask) already resolves against, so ingestion and retrieval can
-never silently drift out of sync (Rule 1).
-
-This replaces hand-specifying --pages/--statement/--period per call
-(still available in ingest.py for one-off manual correction) with a
-single call per filing. It deliberately refuses rather than guesses
-low-quality or ambiguous extraction results.
-"""
+"""Bridge automatic statement discovery into the structured store."""
 
 from __future__ import annotations
 
@@ -56,13 +42,6 @@ def _detect_page_unit(pdf_path: str, page: int) -> str | None:
 
 
 def _table_debug_preview(rows: Any, limit: int = 3) -> list[Any]:
-    """Return a tiny JSON-safe preview so empty-cleanup failures are diagnosable.
-
-    We intentionally do not dump the whole table into the API response: the
-    selected evidence may contain dozens of financial rows, while the first
-    few rows are enough to identify whether the browser sent an empty table,
-    a malformed structure, or an unexpected row shape.
-    """
     if not isinstance(rows, list):
         return [str(type(rows).__name__)]
     preview: list[Any] = []
@@ -77,6 +56,7 @@ def _table_debug_preview(rows: Any, limit: int = 3) -> list[Any]:
 def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, statement: str,
                             pages: list[dict], *, model: str = "mistral-small3.2:24b",
                             consolidated: bool | None = None,
+                            source_type: str = "MANUAL_UPLOAD",
                             unit_resolver: Callable[[int], str | None] | None = None) -> dict[str, Any]:
     requested_period = canonicalize_period(period)
     summary = dict(_EMPTY_SUMMARY)
@@ -96,21 +76,17 @@ def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, st
         page = page_result.get("page")
         page_unit = unit_resolver(page) if unit_resolver else None
         summary["pages_used"] += 1
-
         rows = table.get("rows") or []
         summary["raw_table_rows"] += len(rows) if isinstance(rows, list) else 0
-
         try:
             cleaned = cleanup_table(rows, model=model)
         except Exception as exc:
             summary["cleanup_errors"].append({"page": page, "error": str(exc)})
             continue
-
         summary["cleaned_rows"] += len(cleaned)
         if not cleaned:
             summary["cleanup_errors"].append({
-                "page": page,
-                "error": "table cleanup returned 0 rows",
+                "page": page, "error": "table cleanup returned 0 rows",
                 "raw_row_count": len(rows) if isinstance(rows, list) else None,
                 "table_method": table.get("method"),
                 "table_quality": table.get("quality_score"),
@@ -134,20 +110,20 @@ def ingest_pages_into_store(conn, document_id: int, entity: str, period: str, st
                 source_page=page, source_table=table.get("table_caption"),
                 extraction_method=table.get("method", "unknown"),
                 extraction_confidence=table.get("quality_score", 0.0),
+                source_type=source_type,
             ))
             summary["line_items_stored"] += 1
-
     return summary
 
 
 def auto_ingest(pdf_path: str, entity: str, doc_type: str, fiscal_year: str,
                 period: str, db_path: str, *, top_k: int = 3,
-                model: str = "mistral-small3.2:24b", consolidated: bool | None = None) -> dict[str, Any]:
+                model: str = "mistral-small3.2:24b", consolidated: bool | None = None,
+                source_type: str = "MANUAL_UPLOAD") -> dict[str, Any]:
     discovered = extract_financial_statements(pdf_path, top_k=top_k)
     conn = init_db(db_path)
-    document_id = add_document(conn, entity, doc_type, fiscal_year, pdf_path)
+    document_id = add_document(conn, entity, doc_type, fiscal_year, pdf_path, source_type=source_type)
     requested_period = canonicalize_period(period)
-
     totals = dict(_EMPTY_SUMMARY)
     totals["cleanup_errors"] = []
     per_statement: dict[str, int] = {}
@@ -155,7 +131,7 @@ def auto_ingest(pdf_path: str, entity: str, doc_type: str, fiscal_year: str,
     for statement, pages in discovered["statements"].items():
         summary = ingest_pages_into_store(
             conn, document_id, entity, requested_period, statement, pages,
-            model=model, consolidated=consolidated,
+            model=model, consolidated=consolidated, source_type=source_type,
             unit_resolver=lambda page: _detect_page_unit(pdf_path, page),
         )
         for key in ("line_items_stored", "pages_used", "skipped_low_quality_tables",
@@ -165,9 +141,10 @@ def auto_ingest(pdf_path: str, entity: str, doc_type: str, fiscal_year: str,
         totals["cleanup_errors"].extend(summary["cleanup_errors"])
         per_statement[statement] = summary["line_items_stored"]
 
+    conn.close()
     return {
         "pdf": pdf_path, "entity": entity, "period": requested_period, "document_id": document_id,
-        **totals, "by_statement": per_statement,
+        "source_type": source_type, **totals, "by_statement": per_statement,
     }
 
 
@@ -184,7 +161,6 @@ if __name__ == "__main__":
     p.add_argument("--model", default="mistral-small3.2:24b")
     p.add_argument("--consolidated", choices=["true", "false"], default=None)
     args = p.parse_args()
-
     consolidated = None if args.consolidated is None else args.consolidated == "true"
     summary = auto_ingest(args.pdf_path, args.entity, args.doc_type, args.fiscal_year,
                           args.period, args.db, top_k=args.top_k, model=args.model,

@@ -1,0 +1,29 @@
+{
+  "mcpServers": {
+    "financial": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.financial.server"],
+      "cwd": "/ABSOLUTE/PATH/TO/financial-pdf-agent-v2",
+      "env": {
+        "FINANCIAL_DB_PATH": "data/financials.db"
+      }
+    },
+    "evidence": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.evidence.server"],
+      "cwd": "/ABSOLUTE/PATH/TO/financial-pdf-agent-v2",
+      "env": {
+        "FINANCIAL_DB_PATH": "data/financials.db"
+      }
+    },
+    "retrieval": {
+      "command": "python",
+      "args": ["-m", "mcp_servers.retrieval.server"],
+      "cwd": "/ABSOLUTE/PATH/TO/financial-pdf-agent-v2",
+      "env": {
+        "FINANCIAL_DB_PATH": "data/financials.db",
+        "MCP_RETRIEVAL_CACHE": "data/retrieval_cache"
+      }
+    }
+  }
+}
