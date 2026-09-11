@@ -1,4 +1,4 @@
-"""Ollama runtime backed by deterministic financial, evidence and retrieval tools."""
+"""Ollama runtime backed by deterministic financial, evidence, retrieval and valuation tools."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from .system_prompt import SYSTEM_PROMPT
 from mcp_servers.financial import tools as financial_tools
 from mcp_servers.evidence import tools as evidence_tools
 from mcp_servers.retrieval import tools as retrieval_tools
+from src.valuation.dcf import DCFInputs, run_dcf
 
 DEFAULT_MODEL = "mistral-small3.2:24b"
 MAX_TURNS = 8
@@ -25,11 +26,13 @@ FINANCIAL_SCHEMAS = [
     {"type":"function","function":{"name":"calculate_return_ratio","description":"Calculate ROA or ROE under the deterministic rule book.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"ratio":{"type":"string","enum":["roa","roe"]},"period":{"type":"string"},"prior_period":{"type":"string"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","ratio","period"]}}},
     {"type":"function","function":{"name":"calculate_cagr","description":"Calculate CAGR under the deterministic rule book.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"start_period":{"type":"string"},"end_period":{"type":"string"},"n_years":{"type":"number"},"statement":{"type":"string","enum":["balance_sheet","income_statement","cash_flow"]},"consolidated":{"type":"boolean"}},"required":["entity","metric","start_period","end_period","n_years"]}}},
     {"type":"function","function":{"name":"run_validation_checks","description":"Run deterministic accounting reconciliation checks for one entity and period.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"period":{"type":"string"},"consolidated":{"type":"boolean"}},"required":["entity","period"]}}},
+    {"type":"function","function":{"name":"run_dcf","description":"Run the deterministic discounted-cash-flow engine from explicit forecast and capital-structure inputs. The model performs no arithmetic itself.","parameters":{"type":"object","properties":{"revenue":{"type":"array","items":{"type":"number"}},"ebit_margin":{"type":"array","items":{"type":"number"}},"tax_rate":{"type":"array","items":{"type":"number"}},"da":{"type":"array","items":{"type":"number"}},"capex":{"type":"array","items":{"type":"number"}},"delta_nwc":{"type":"array","items":{"type":"number"}},"shares_outstanding":{"type":"number"},"cash":{"type":"number"},"debt":{"type":"number"},"wacc":{"type":"number"},"terminal_growth":{"type":"number"},"exit_multiple":{"type":"number"}},"required":["revenue","ebit_margin","tax_rate","da","capex","delta_nwc","shares_outstanding","cash","debt"]}}},
 ]
 
 EVIDENCE_SCHEMAS = [
     {"type":"function","function":{"name":"get_evidence","description":"Retrieve stored evidence and provenance. Multiple candidates return CONFLICTED rather than silently choosing.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"statement":{"type":"string"},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
-    {"type":"function","function":{"name":"compare_evidence","description":"Classify multiple evidence candidates as AGREES, ROUNDING_DIFFERENCE, UNIT_DIFFERENCE, RESTATED, SCOPE_DIFFERENCE or TRUE_CONFLICT.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"candidates":{"type":"array","items":{"type":"object"}},"statement":{"type":"string"},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
+    {"type":"function","function":{"name":"compare_fact_candidates","description":"Classify fact candidates as AGREES, ROUNDING_DIFFERENCE, RESTATED, SCOPE_DIFFERENCE, UNIT_DIFFERENCE or TRUE_CONFLICT.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"candidates":{"type":"array","items":{"type":"object"}},"statement":{"type":"string"},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
+    {"type":"function","function":{"name":"compare_evidence","description":"Backward-compatible alias for compare_fact_candidates.","parameters":{"type":"object","properties":{"entity":{"type":"string"},"metric":{"type":"string"},"period":{"type":"string"},"candidates":{"type":"array","items":{"type":"object"}},"statement":{"type":"string"},"consolidated":{"type":"boolean"}},"required":["entity","metric","period"]}}},
 ]
 
 RETRIEVAL_SCHEMAS = [
@@ -49,7 +52,9 @@ DISPATCH = {
     "calculate_return_ratio": financial_tools.calculate_return_ratio,
     "calculate_cagr": financial_tools.calculate_cagr,
     "run_validation_checks": financial_tools.run_validation_checks,
+    "run_dcf": lambda **kwargs: {"status": "DERIVED", **__import__("dataclasses").asdict(run_dcf(DCFInputs(**kwargs)))},
     "get_evidence": evidence_tools.get_evidence,
+    "compare_fact_candidates": evidence_tools.compare_fact_candidates,
     "compare_evidence": evidence_tools.compare_evidence,
     "search_filings": retrieval_tools.search_filings,
     "fetch_document": retrieval_tools.fetch_document,
