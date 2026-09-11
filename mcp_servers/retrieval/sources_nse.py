@@ -43,7 +43,15 @@ def _session() -> requests.Session:
 def _resolve_symbol(session: requests.Session, company: str) -> dict[str, Any] | None:
     target = company.strip().lower()
     response = session.get(NSE_AUTOCOMPLETE, params={"q": company}, timeout=15)
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as exc:
+        # NSE has intermittently removed or disabled its autocomplete endpoint.
+        # The financial-results endpoint still accepts a known equity symbol,
+        # so preserve direct ticker lookups instead of failing the whole source.
+        if exc.response is not None and exc.response.status_code == 404 and company.strip():
+            return {"symbol": company.strip(), "symbol_info": company.strip()}
+        raise
     payload = response.json() or {}
     symbols = payload.get("symbols") or []
     if not symbols:
