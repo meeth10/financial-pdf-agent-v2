@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any
 
@@ -126,7 +127,7 @@ def _search_india(company: str, period: str | None, exchange: str, consolidated:
         except Exception as exc:
             errors.append(f"{item_exchange}: {exc}")
 
-    def rank(item: dict[str, Any]) -> tuple[int, int, int, str]:
+    def rank(item: dict[str, Any]) -> tuple[int, int, int, int, str]:
         scope = item.get("scope_asserted")
         format_name = str(item.get("format") or "PDF").upper()
         scope_score = 2 if scope is consolidated else 1 if scope is None else 0
@@ -134,10 +135,55 @@ def _search_india(company: str, period: str | None, exchange: str, consolidated:
         same_period_score = 0
         if period and canonicalize_period(str(item.get("period") or "")) == canonicalize_period(period):
             same_period_score = 1
-        return (scope_score, same_period_score, structured_score, str(item.get("filing_date") or ""))
+        subject = str(item.get("subject") or "").lower()
+        filing_score = int(any(token in subject for token in ("financial result", "integrated filing", "financial results")))
+        return (scope_score, same_period_score, filing_score, structured_score, str(item.get("filing_date") or ""))
 
     candidates.sort(key=rank, reverse=True)
     return candidates, errors
+
+
+def _pdf_scope(path: Path) -> bool | None:
+    """Read the first few PDF pages and return an explicit consolidation scope."""
+    try:
+        import fitz
+        with fitz.open(str(path)) as document:
+            text = "\n".join(page.get_text("text") for page in document[:4])
+        has_consolidated = bool(re.search(r"\bconsolidated\b", text, re.I))
+        has_standalone = bool(re.search(r"\bstandalone\b", text, re.I))
+        if has_consolidated and not has_standalone:
+            return True
+        if has_standalone and not has_consolidated:
+            return False
+    except Exception:
+        return None
+    return None
+
+
+def _scope_from_document(candidates: list[dict[str, Any]], consolidated: bool,
+                         period: str | None = None) -> dict[str, Any] | None:
+    """Resolve missing exchange scope by inspecting candidate PDF content."""
+    ordered = sorted(
+        [c for c in candidates if c.get("scope_asserted") is None and str(c.get("format") or "PDF").upper() == "PDF"],
+        key=lambda c: (
+            1 if period and canonicalize_period(str(c.get("period") or "")) == canonicalize_period(period) else 0,
+            1 if any(token in str(c.get("subject") or "").lower() for token in ("financial result", "integrated filing", "financial results")) else 0,
+            str(c.get("filing_date") or ""),
+        ),
+        reverse=True,
+    )
+    for candidate in ordered[:8]:
+        try:
+            path = _download_attachment(str(candidate["url"]), str(candidate.get("exchange") or "INDIA"), "PDF")
+            detected = _pdf_scope(path)
+        except Exception:
+            continue
+        if detected is consolidated:
+            enriched = dict(candidate)
+            enriched["scope_asserted"] = detected
+            enriched["scope_source"] = "FILING_CONTENT"
+            return enriched
+    return None
 
 
 def _select_candidate(candidates: list[dict[str, Any]], consolidated: bool, period: str | None = None) -> dict[str, Any] | None:
@@ -171,6 +217,8 @@ def get_or_fetch_financials(entity: str, period: str | None = None,
                 "source_errors": errors}
 
     selected = _select_candidate(candidates, consolidated, canonical_period or None)
+    if selected is None:
+        selected = _scope_from_document(candidates, consolidated, canonical_period or None)
     if selected is None:
         return {"status": "SOURCE_UNAVAILABLE", "entity": entity,
                 "period": canonical_period or None, "consolidated": consolidated,
