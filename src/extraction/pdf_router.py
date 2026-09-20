@@ -358,14 +358,29 @@ def extract_page_tables(pdf_path: str, page_number: int) -> list[ExtractedTable]
         candidates = viable
 
     best = candidates[0]
+
+    def _rows_signature(rows: list[list[str]]) -> tuple[tuple[str, ...], ...]:
+        return tuple(
+            tuple(re.sub(r"\\s+", " ", str(cell or "")).strip() for cell in row)
+            for row in rows
+        )
+
+    # Multiple Camelot strategies often return the *same* logical table with
+    # different method labels. Returning both would make ingest store every
+    # line item twice. Treat identical normalized row content as the same
+    # candidate, regardless of extractor method.
+    seen_signatures = {_rows_signature(best.rows)}
     unique: list[ExtractedTable] = [best]
     for candidate in candidates[1:]:
         if candidate.quality_score < max(best.quality_score - 0.12, MIN_ACCEPTABLE_SCORE):
+            continue
+        if _rows_signature(candidate.rows) in seen_signatures:
             continue
         shape_a = (len(best.rows), max((len(r) for r in best.rows), default=0))
         shape_b = (len(candidate.rows), max((len(r) for r in candidate.rows), default=0))
         if shape_a != shape_b or candidate.method != best.method:
             unique.append(candidate)
+            seen_signatures.add(_rows_signature(candidate.rows))
         if len(unique) >= 2:
             break
     return unique
